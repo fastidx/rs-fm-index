@@ -148,6 +148,22 @@ fn run_stats(index_path: &str) {
             println!("ISA bytes: {} ({})", s.isa_bytes, format_bytes(s.isa_bytes));
             println!("SA sample rate: {}", s.sa_sample_rate);
             println!("ISA sample rate: {}", s.isa_sample_rate);
+            println!(
+                "SA bits: {}",
+                if s.sa_bits == 0 {
+                    "u64".to_string()
+                } else {
+                    format!("{}", s.sa_bits)
+                }
+            );
+            println!(
+                "ISA bits: {}",
+                if s.isa_bits == 0 {
+                    "u64".to_string()
+                } else {
+                    format!("{}", s.isa_bits)
+                }
+            );
             println!("SA samples: {}", s.sa_samples);
             println!("ISA samples: {}", s.isa_samples);
             println!("Doc offsets count: {}", s.doc_offsets_count);

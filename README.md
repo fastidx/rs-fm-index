@@ -131,8 +131,8 @@ Each `.idx` shard contains:
 
 1. Header (bincode, legacy config)
 2. Global Wavelet Tree bitstream (paged with base-rank headers)
-3. Sampled SA (u64)
-4. Sampled ISA (u64)
+3. Sampled SA (bitpacked u32 when possible, else u64)
+4. Sampled ISA (bitpacked u32 when possible, else u64)
 5. Doc offsets encoded with **Elias-Fano**
 
 Doc offsets are encoded with Elias-Fano to support compact storage and fast mapping from

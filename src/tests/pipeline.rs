@@ -61,7 +61,17 @@ fn test_header_roundtrip() {
     ];
 
     let doc_offsets = vec![0u64, 5, 10, 20, 21];
-    let mut header = ShardHeader::new(101, 4, 4, c_table, codes, tree_shape.clone(), doc_offsets.clone());
+    let mut header = ShardHeader::new(
+        101,
+        4,
+        4,
+        0,
+        0,
+        c_table,
+        codes,
+        tree_shape.clone(),
+        doc_offsets.clone(),
+    );
     header.wt_start_offset = 777;
     header.sa_start_offset = 888;
 
@@ -101,8 +111,13 @@ fn test_builder_offsets_and_lengths() {
     assert_eq!(header.wt_start_offset, header_size);
 
     let file_len = std::fs::metadata(tmp_file.path()).unwrap().len();
-    let expected_sa_bytes = sample_count(text.len(), sample_rate) as u64 * 8;
-    let expected_isa_bytes = sample_count(text.len(), header.isa_sample_rate) as u64 * 8;
+    let sa_bits = if header.sa_bits == 0 { 64 } else { header.sa_bits as u64 };
+    let isa_bits = if header.isa_bits == 0 { 64 } else { header.isa_bits as u64 };
+    let sa_words = ((sample_count(text.len(), sample_rate) as u64 * sa_bits) + 31) / 32;
+    let isa_words =
+        ((sample_count(text.len(), header.isa_sample_rate) as u64 * isa_bits) + 31) / 32;
+    let expected_sa_bytes = sa_words * 4;
+    let expected_isa_bytes = isa_words * 4;
     assert_eq!(header.isa_start_offset, header.sa_start_offset + expected_sa_bytes);
     assert_eq!(header.isa_start_offset + expected_isa_bytes, file_len);
 }
@@ -120,7 +135,7 @@ fn test_sampled_sa_matches_reference() {
     let reader = PagedReader::new(tmp_file.path(), 999, cache).unwrap();
 
     let sa_len = sample_count(text.len(), sample_rate);
-    let sa = PagedSampledSA::new(reader, sa_len, header.sa_start_offset);
+    let sa = PagedSampledSA::new(reader, sa_len, header.sa_start_offset, header.sa_bits);
 
     let (_, full_sa) = div_sort(text).into_parts();
     let expected: Vec<u64> = full_sa
@@ -190,7 +205,12 @@ fn test_full_ingestion_pipeline() {
     let reader = PagedReader::new(tmp_file.path(), 999, cache).unwrap();
 
     // 4a. Sampled SA
-    let sa = PagedSampledSA::new(reader.clone(), sample_count(text.len(), 4), header.sa_start_offset);
+    let sa = PagedSampledSA::new(
+        reader.clone(),
+        sample_count(text.len(), 4),
+        header.sa_start_offset,
+        header.sa_bits,
+    );
 
     let val0 = sa.get(0).unwrap(); // Index 0 in stored array (real index 0)
     assert_eq!(val0, 11); // sentinel position

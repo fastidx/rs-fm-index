@@ -26,12 +26,22 @@ impl QueryEngine {
         // Initialize Sampled SA Reader
         let sa_len = (header.text_len as usize + header.sa_sample_rate as usize - 1)
             / header.sa_sample_rate as usize;
-        let sa = PagedSampledSA::new(reader.clone(), sa_len, header.sa_start_offset);
+        let sa = PagedSampledSA::new(
+            reader.clone(),
+            sa_len,
+            header.sa_start_offset,
+            header.sa_bits,
+        );
 
         // Initialize Sampled ISA Reader
         let isa_len = (header.text_len as usize + header.isa_sample_rate as usize - 1)
             / header.isa_sample_rate as usize;
-        let isa = PagedSampledSA::new(reader.clone(), isa_len, header.isa_start_offset);
+        let isa = PagedSampledSA::new(
+            reader.clone(),
+            isa_len,
+            header.isa_start_offset,
+            header.isa_bits,
+        );
 
         let mut doc_offsets = header.decode_doc_offsets().unwrap_or_else(|_| Vec::new());
         if doc_offsets.is_empty() {

@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, Cursor, Write};
 use std::path::Path;
 
+use crate::index::bitpack;
 use crate::index::header::ShardHeader;
 use crate::index::wavelet::WaveletTreeBuilder;
 
@@ -118,11 +119,58 @@ impl ShardBuilder {
         let (_wt_offset, tree_shape) = wt_builder.write_to_file(&mut wt_buf)?;
         let wt_bytes = wt_buf.into_inner();
 
+        // Compute sample lengths
+        let sa_len = (len + self.sample_rate as usize - 1) / self.sample_rate as usize;
+        let isa_len = (len + self.sample_rate as usize - 1) / self.sample_rate as usize;
+
+        let can_pack_u32 = len <= u32::MAX as usize;
+
+        let mut sa_bits: u8 = 0;
+        let mut isa_bits: u8 = 0;
+        let mut sa_packed: Option<Vec<u32>> = None;
+        let mut isa_packed: Option<Vec<u32>> = None;
+
+        if sa_len > 0 && can_pack_u32 {
+            let mut samples = Vec::with_capacity(sa_len);
+            for (i, &sa_val) in sa_u64.iter().enumerate() {
+                if i % (self.sample_rate as usize) == 0 {
+                    samples.push(sa_val as u32);
+                }
+            }
+
+            let w = bitpack::required_bits_u32(&samples) as u8;
+            let words = (samples.len() * w as usize).div_ceil(32);
+            let mut packed = vec![0u32; words.max(1)];
+            let (packed_w, written) = bitpack::pack_u32_dynamic(&samples, &mut packed);
+            packed.truncate(written);
+            sa_bits = packed_w as u8;
+            sa_packed = Some(packed);
+        }
+
+        if isa_len > 0 && can_pack_u32 {
+            let mut samples = Vec::with_capacity(isa_len);
+            for (i, &isa_val) in isa_u64.iter().enumerate() {
+                if i % (self.sample_rate as usize) == 0 {
+                    samples.push(isa_val as u32);
+                }
+            }
+
+            let w = bitpack::required_bits_u32(&samples) as u8;
+            let words = (samples.len() * w as usize).div_ceil(32);
+            let mut packed = vec![0u32; words.max(1)];
+            let (packed_w, written) = bitpack::pack_u32_dynamic(&samples, &mut packed);
+            packed.truncate(written);
+            isa_bits = packed_w as u8;
+            isa_packed = Some(packed);
+        }
+
         // Prepare Header (with placeholder offsets)
         let mut header = ShardHeader::new(
             len as u64,
             self.sample_rate,
             self.sample_rate, // Use same rate for ISA
+            sa_bits,
+            isa_bits,
             c_table,
             codes,
             tree_shape.clone(),
@@ -135,8 +183,23 @@ impl ShardBuilder {
         let header_size = header_bytes.len() as u64;
 
         // Compute offsets for SA/ISA
-        let sa_len = (len + self.sample_rate as usize - 1) / self.sample_rate as usize;
-        let sa_bytes_len = sa_len as u64 * 8;
+        let sa_bytes_len = if sa_bits == 0 {
+            sa_len as u64 * 8
+        } else {
+            sa_packed
+                .as_ref()
+                .map(|v| v.len() as u64 * 4)
+                .unwrap_or(0)
+        };
+
+        let _isa_bytes_len = if isa_bits == 0 {
+            isa_len as u64 * 8
+        } else {
+            isa_packed
+                .as_ref()
+                .map(|v| v.len() as u64 * 4)
+                .unwrap_or(0)
+        };
 
         header.tree_shape = tree_shape;
         header.wt_start_offset = header_size;
@@ -157,20 +220,36 @@ impl ShardBuilder {
         writer.write_all(&wt_bytes)?;
 
         // 7. Write Sampled Suffix Array (SA)
-        let mut int_buffer = [0u8; 8]; // Buffer for u64
-
-        for (i, &sa_val) in sa_u64.iter().enumerate() {
-            if i % (self.sample_rate as usize) == 0 {
-                LittleEndian::write_u64(&mut int_buffer, sa_val);
-                writer.write_all(&int_buffer)?;
+        if sa_bits == 0 {
+            let mut int_buffer = [0u8; 8]; // Buffer for u64
+            for (i, &sa_val) in sa_u64.iter().enumerate() {
+                if i % (self.sample_rate as usize) == 0 {
+                    LittleEndian::write_u64(&mut int_buffer, sa_val);
+                    writer.write_all(&int_buffer)?;
+                }
+            }
+        } else if let Some(packed) = sa_packed.as_ref() {
+            let mut buf = [0u8; 4];
+            for &word in packed {
+                LittleEndian::write_u32(&mut buf, word);
+                writer.write_all(&buf)?;
             }
         }
 
         // 8. Write Sampled Inverse Suffix Array (ISA)
-        for (i, &isa_val) in isa_u64.iter().enumerate() {
-            if i % (self.sample_rate as usize) == 0 {
-                LittleEndian::write_u64(&mut int_buffer, isa_val);
-                writer.write_all(&int_buffer)?;
+        if isa_bits == 0 {
+            let mut int_buffer = [0u8; 8]; // Buffer for u64
+            for (i, &isa_val) in isa_u64.iter().enumerate() {
+                if i % (self.sample_rate as usize) == 0 {
+                    LittleEndian::write_u64(&mut int_buffer, isa_val);
+                    writer.write_all(&int_buffer)?;
+                }
+            }
+        } else if let Some(packed) = isa_packed.as_ref() {
+            let mut buf = [0u8; 4];
+            for &word in packed {
+                LittleEndian::write_u32(&mut buf, word);
+                writer.write_all(&buf)?;
             }
         }
 

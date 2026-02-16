@@ -9,17 +9,26 @@ pub struct PagedSampledSA {
     reader: PagedReader,
     len: usize,        // Number of elements (u64 integers)
     start_offset: u64, // Byte offset in the file where the SA begins
+    bits: u8,          // 0 = plain u64, 1..=32 = packed u32 width
+    byte_len: u64,     // Total bytes for the packed representation
 }
 
 impl PagedSampledSA {
     /// Initialize the view.
     /// `len` is the number of items in the SA (not bytes).
     /// `start_offset` allows this to live inside a larger .idx container file.
-    pub fn new(reader: PagedReader, len: usize, start_offset: u64) -> Self {
+    pub fn new(reader: PagedReader, len: usize, start_offset: u64, bits: u8) -> Self {
+        let byte_len = if bits == 0 {
+            len as u64 * 8
+        } else {
+            ((len as u64 * bits as u64) + 7) / 8
+        };
         Self {
             reader,
             len,
             start_offset,
+            bits,
+            byte_len,
         }
     }
 
@@ -41,17 +50,52 @@ impl PagedSampledSA {
                 "Index out of bounds",
             ));
         }
+        if self.bits == 0 {
+            // 1. Calculate Byte Offset
+            let element_size = size_of::<u64>() as u64;
+            let abs_offset = self.start_offset + (i as u64 * element_size);
 
-        // 1. Calculate Byte Offset
-        let element_size = size_of::<u64>() as u64;
-        let abs_offset = self.start_offset + (i as u64 * element_size);
+            // 2. Read from Paged Reader
+            let bytes = self.reader.read_at(abs_offset, 8)?;
 
-        // 2. Read from Paged Reader
-        // This handles the page alignment logic internally.
-        let bytes = self.reader.read_at(abs_offset, 8)?;
+            // 3. Deserialize
+            Ok(LittleEndian::read_u64(&bytes))
+        } else {
+            if self.bits > 32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "packed width > 32 not supported",
+                ));
+            }
 
-        // 3. Deserialize
-        Ok(LittleEndian::read_u64(&bytes))
+            let bit_offset = i as u64 * self.bits as u64;
+            let byte_offset = bit_offset / 8;
+            let bit_in_byte = (bit_offset % 8) as u32;
+            let bytes_needed = ((bit_in_byte as u64 + self.bits as u64 + 7) / 8) as usize;
+
+            if byte_offset + bytes_needed as u64 > self.byte_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Packed read beyond buffer",
+                ));
+            }
+
+            let bytes = self
+                .reader
+                .read_at(self.start_offset + byte_offset, bytes_needed)?;
+
+            let mut buf = [0u8; 8];
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            let raw = u64::from_le_bytes(buf);
+
+            let mask = if self.bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << self.bits) - 1
+            };
+
+            Ok((raw >> bit_in_byte) & mask)
+        }
     }
 
     /// Bulk read for range queries (optimization).
@@ -60,21 +104,28 @@ impl PagedSampledSA {
         if end > self.len || start > end {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid range"));
         }
-
         let count = end - start;
-        let element_size = size_of::<u64>();
-        let abs_offset = self.start_offset + (start as u64 * element_size as u64);
-        let total_bytes = count * element_size;
+        if self.bits == 0 {
+            let element_size = size_of::<u64>();
+            let abs_offset = self.start_offset + (start as u64 * element_size as u64);
+            let total_bytes = count * element_size;
 
-        let raw_bytes = self.reader.read_at(abs_offset, total_bytes)?;
+            let raw_bytes = self.reader.read_at(abs_offset, total_bytes)?;
 
-        // Convert [u8] -> [u64]
-        let mut result = Vec::with_capacity(count);
-        for chunk in raw_bytes.chunks_exact(8) {
-            result.push(LittleEndian::read_u64(chunk));
+            // Convert [u8] -> [u64]
+            let mut result = Vec::with_capacity(count);
+            for chunk in raw_bytes.chunks_exact(8) {
+                result.push(LittleEndian::read_u64(chunk));
+            }
+
+            Ok(result)
+        } else {
+            let mut result = Vec::with_capacity(count);
+            for i in start..end {
+                result.push(self.get(i)?);
+            }
+            Ok(result)
         }
-
-        Ok(result)
     }
 }
 
@@ -115,6 +166,7 @@ impl PagedSampledSA {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::bitpack;
     use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
     use std::io::Write;
     use std::sync::Arc;
@@ -153,7 +205,7 @@ mod tests {
         let reader = PagedReader::new(file.path(), 555, cache).unwrap();
 
         // Initialize SA at the offset
-        let sa = PagedSampledSA::new(reader, sa_len, start_offset as u64);
+        let sa = PagedSampledSA::new(reader, sa_len, start_offset as u64, 0);
 
         // 1. Verify Length
         assert_eq!(sa.len(), sa_len);
@@ -187,7 +239,7 @@ mod tests {
 
         let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1));
         let reader = PagedReader::new(file.path(), 777, cache).unwrap();
-        let sa = PagedSampledSA::new(reader, sa_len, start_offset);
+        let sa = PagedSampledSA::new(reader, sa_len, start_offset, 0);
 
         // Fetch a range that spans multiple pages.
         // 3000 ints * 8 = 24000 bytes.
@@ -204,7 +256,7 @@ mod tests {
         let cache = Arc::new(GlobalPageCache::new(1024, 1));
         let reader = PagedReader::new(file.path(), 888, cache).unwrap();
 
-        let sa = PagedSampledSA::new(reader, 0, 0);
+        let sa = PagedSampledSA::new(reader, 0, 0, 0);
         assert_eq!(sa.len(), 0);
         assert!(sa.get(0).is_err());
         assert!(sa.get_range(0, 1).is_err());
@@ -226,9 +278,36 @@ mod tests {
 
         let cache = Arc::new(GlobalPageCache::new(1024 * 1024, 1));
         let reader = PagedReader::new(file.path(), 9999, cache).unwrap();
-        let sa = PagedSampledSA::new(reader, count, start_offset);
+        let sa = PagedSampledSA::new(reader, count, start_offset, 0);
 
         assert_eq!(sa.get(0).unwrap(), base);
         assert_eq!(sa.get(count - 1).unwrap(), base + (count as u64 - 1));
+    }
+
+    #[test]
+    fn test_sa_packed_u32_access() {
+        let count = 2048;
+        let values: Vec<u32> = (0..count).map(|i| (i * 3) as u32).collect();
+        let w = bitpack::required_bits_u32(&values);
+        let words = (values.len() * w).div_ceil(32);
+        let mut packed = vec![0u32; words.max(1)];
+        let (packed_w, written) = bitpack::pack_u32_dynamic(&values, &mut packed);
+        packed.truncate(written);
+
+        let mut file = NamedTempFile::new().unwrap();
+        for word in &packed {
+            file.write_all(&word.to_le_bytes()).unwrap();
+        }
+        file.as_file().sync_all().unwrap();
+
+        let cache = Arc::new(GlobalPageCache::new(1024 * 1024, 1));
+        let reader = PagedReader::new(file.path(), 4242, cache).unwrap();
+        let sa = PagedSampledSA::new(reader, values.len(), 0, packed_w as u8);
+
+        assert_eq!(sa.get(0).unwrap(), values[0] as u64);
+        assert_eq!(sa.get(1).unwrap(), values[1] as u64);
+        assert_eq!(sa.get(128).unwrap(), values[128] as u64);
+        assert_eq!(sa.get(1023).unwrap(), values[1023] as u64);
+        assert_eq!(sa.get(count - 1).unwrap(), values[count - 1] as u64);
     }
 }

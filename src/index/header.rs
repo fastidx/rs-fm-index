@@ -47,7 +47,7 @@ mod serde_arrays {
 }
 
 pub const MAGIC_BYTES: u64 = 0x494E_4649_4752_414D; // "INFIGRAM" in hex
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ShardHeader {
@@ -56,6 +56,8 @@ pub struct ShardHeader {
     pub text_len: u64,
     pub sa_sample_rate: u32,
     pub isa_sample_rate: u32,
+    pub sa_bits: u8,
+    pub isa_bits: u8,
     pub doc_offsets_count: u32,
     pub doc_offsets_l: u8,
     pub doc_offsets_u_bits_len: u64,
@@ -88,6 +90,8 @@ impl ShardHeader {
         text_len: u64,
         sa_sample_rate: u32,
         isa_sample_rate: u32,
+        sa_bits: u8,
+        isa_bits: u8,
         c_table: [u64; 256],
         codes: [Option<HuffmanCode>; 256],
         tree_shape: Vec<WaveletNodeShape>,
@@ -102,6 +106,8 @@ impl ShardHeader {
             text_len,
             sa_sample_rate,
             isa_sample_rate,
+            sa_bits,
+            isa_bits,
             doc_offsets_count,
             doc_offsets_l,
             doc_offsets_u_bits_len,
