@@ -188,4 +188,96 @@ fn test_query_10mb_file() {
 
     let locs3 = query.locate(&marker3).unwrap();
     assert_eq!(locs3, vec![pos3]);
+
+    // Extract checks for unique markers
+    let extract1 = query.extract(pos1, marker1.len()).unwrap();
+    assert_eq!(extract1, marker1);
+    let extract2 = query.extract(pos2, marker2.len()).unwrap();
+    assert_eq!(extract2, marker2);
+    let extract3 = query.extract(pos3, marker3.len()).unwrap();
+    assert_eq!(extract3, marker3);
+}
+
+#[test]
+fn test_extract_roundtrip_random() {
+    let mut rng = StdRng::seed_from_u64(4242);
+    let len = 2000;
+    let mut text = Vec::with_capacity(len + 1);
+    for _ in 0..len {
+        text.push(rng.random_range(1..=50));
+    }
+    text.push(0); // sentinel
+
+    let query = build_query_engine(&text, 7);
+
+    for _ in 0..200 {
+        let start = rng.random_range(0..text.len());
+        let max_len = text.len() - start;
+        let slice_len = rng.random_range(0..=max_len.min(64));
+        let expected = text[start..start + slice_len].to_vec();
+        let actual = query.extract(start, slice_len).unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn test_extract_end_boundary() {
+    let text = b"abcd\0";
+    let query = build_query_engine(text, 2);
+
+    let tail = query.extract(4, 1).unwrap();
+    assert_eq!(tail, vec![0u8]);
+
+    let end_two = query.extract(3, 2).unwrap();
+    assert_eq!(end_two, b"d\0");
+
+    let full = query.extract(0, text.len()).unwrap();
+    assert_eq!(full, text);
+}
+
+#[test]
+fn test_multi_document_retrieval() {
+    let doc1 = b"Hello World";
+    let doc2 = b"Rust is fast";
+    let doc3 = b"Infini-gram search";
+
+    let mut text = Vec::new();
+    let mut offsets = Vec::new();
+
+    offsets.push(text.len() as u64);
+    text.extend_from_slice(doc1);
+    text.push(0);
+
+    offsets.push(text.len() as u64);
+    text.extend_from_slice(doc2);
+    text.push(0);
+
+    offsets.push(text.len() as u64);
+    text.extend_from_slice(doc3);
+    text.push(0);
+
+    let builder = ShardBuilder::new(4);
+    let tmp_file = NamedTempFile::new().unwrap();
+    builder
+        .build_with_offsets(&text, offsets.clone(), tmp_file.path())
+        .unwrap();
+
+    let header = decode_header_from_path(tmp_file.path());
+    let cache = Arc::new(GlobalPageCache::new(1024 * 1024, 1));
+    let reader = PagedReader::new(tmp_file.path(), 888, cache).unwrap();
+    let query = QueryEngine::new(header, reader);
+
+    let locs = query.locate(b"fast").unwrap();
+    assert_eq!(locs.len(), 1);
+    let global_pos = locs[0];
+    let (doc_id, offset) = query.pos_to_doc_id(global_pos).unwrap();
+    assert_eq!(doc_id, 1);
+    assert_eq!(offset, 8);
+
+    let retrieved_doc1 = query.get_document(0).unwrap();
+    assert_eq!(retrieved_doc1, doc1);
+    let retrieved_doc2 = query.get_document(1).unwrap();
+    assert_eq!(retrieved_doc2, doc2);
+    let retrieved_doc3 = query.get_document(2).unwrap();
+    assert_eq!(retrieved_doc3, doc3);
 }

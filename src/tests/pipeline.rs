@@ -53,14 +53,15 @@ fn test_header_roundtrip() {
         WaveletNodeShape::Internal {
             left_idx: 1,
             right_idx: 2,
-            bv_offset: 123,
-            bv_len: 456,
+            bit_start: 123,
+            bit_len: 456,
         },
         WaveletNodeShape::Leaf { symbol: 0 },
         WaveletNodeShape::Leaf { symbol: 255 },
     ];
 
-    let mut header = ShardHeader::new(101, 4, c_table, codes, tree_shape.clone());
+    let doc_offsets = vec![0u64, 5, 10];
+    let mut header = ShardHeader::new(101, 4, 4, c_table, codes, tree_shape.clone(), doc_offsets.clone());
     header.wt_start_offset = 777;
     header.sa_start_offset = 888;
 
@@ -79,6 +80,8 @@ fn test_header_roundtrip() {
     assert_eq!(decoded.c_table[10], c_table[10]);
     assert_eq!(decoded.codes[0], codes[0]);
     assert_eq!(decoded.codes[255], codes[255]);
+    let decoded_offsets = decoded.decode_doc_offsets().unwrap();
+    assert_eq!(decoded_offsets, doc_offsets);
 }
 
 #[test]
@@ -99,7 +102,9 @@ fn test_builder_offsets_and_lengths() {
 
     let file_len = std::fs::metadata(tmp_file.path()).unwrap().len();
     let expected_sa_bytes = sample_count(text.len(), sample_rate) as u64 * 4;
-    assert_eq!(header.sa_start_offset + expected_sa_bytes, file_len);
+    let expected_isa_bytes = sample_count(text.len(), header.isa_sample_rate) as u64 * 4;
+    assert_eq!(header.isa_start_offset, header.sa_start_offset + expected_sa_bytes);
+    assert_eq!(header.isa_start_offset + expected_isa_bytes, file_len);
 }
 
 #[test]
@@ -152,6 +157,7 @@ fn test_wavelet_rank_matches_naive_random() {
         header.tree_shape,
         header.codes,
         header.text_len as usize,
+        header.wt_start_offset,
     );
 
     let bwt = build_bwt(&text);
@@ -190,7 +196,13 @@ fn test_full_ingestion_pipeline() {
     assert_eq!(val0, 11); // sentinel position
 
     // 4b. Wavelet Tree
-    let wt = PagedWaveletTree::new(reader, header.tree_shape, header.codes, text.len());
+    let wt = PagedWaveletTree::new(
+        reader,
+        header.tree_shape,
+        header.codes,
+        text.len(),
+        header.wt_start_offset,
+    );
 
     let rank_i = wt.rank(b'i', 12).unwrap();
     assert_eq!(rank_i, 4);

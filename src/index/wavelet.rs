@@ -30,15 +30,14 @@ impl PagedBitVector {
     }
 
     pub fn rank1(&self, i: usize) -> io::Result<usize> {
-        if i == 0 {
+        let limit = i.min(self.len_bits);
+        if limit == 0 {
             return Ok(0);
         }
-        if i > self.len_bits {
-            return self.rank1(self.len_bits);
-        }
 
-        let page_idx = i / BITS_PER_PAGE;
-        let bit_offset_in_page = i % BITS_PER_PAGE;
+        let last_bit = limit - 1;
+        let page_idx = last_bit / BITS_PER_PAGE;
+        let bit_offset_in_page = (last_bit % BITS_PER_PAGE) + 1;
 
         let page_start_global = self.start_offset + (page_idx as u64 * PAGE_SIZE as u64);
         let page_data = self.reader.read_at(page_start_global, PAGE_SIZE)?;
@@ -64,8 +63,9 @@ impl PagedBitVector {
     }
 
     pub fn rank0(&self, i: usize) -> io::Result<usize> {
-        let r1 = self.rank1(i)?;
-        Ok(i - r1)
+        let limit = i.min(self.len_bits);
+        let r1 = self.rank1(limit)?;
+        Ok(limit - r1)
     }
 
     /// Get the bit at index `i`
@@ -202,8 +202,8 @@ pub enum WaveletNodeShape {
     Internal {
         left_idx: usize,
         right_idx: usize,
-        bv_offset: u64,
-        bv_len: usize,
+        bit_start: usize,
+        bit_len: usize,
     },
 }
 
@@ -298,62 +298,74 @@ impl WaveletTreeBuilder {
         self,
         writer: &mut W,
     ) -> io::Result<(u64, Vec<WaveletNodeShape>)> {
-        let mut shape_map = Vec::new();
         let start_pos = writer.stream_position()?;
+        let mut shape_map = Vec::with_capacity(self.nodes.len());
+        let mut global_bit_cursor = 0usize;
 
-        for (i, node) in self.nodes.into_iter().enumerate() {
+        // Flatten all node bitvectors into a single packed bitstream.
+        let mut packed_data: Vec<u8> = Vec::new();
+        let mut current_byte = 0u8;
+        let mut bit_in_byte = 0u8;
+
+        let push_bit = |bit: bool,
+                        packed_data: &mut Vec<u8>,
+                        current_byte: &mut u8,
+                        bit_in_byte: &mut u8| {
+            if bit {
+                *current_byte |= 1 << *bit_in_byte;
+            }
+            *bit_in_byte += 1;
+            if *bit_in_byte == 8 {
+                packed_data.push(*current_byte);
+                *current_byte = 0;
+                *bit_in_byte = 0;
+            }
+        };
+
+        for (i, node) in self.nodes.iter().enumerate() {
             match node {
                 BuilderNode::Leaf(sym) => {
-                    shape_map.push(WaveletNodeShape::Leaf { symbol: sym });
+                    shape_map.push(WaveletNodeShape::Leaf { symbol: *sym });
                 }
                 BuilderNode::Internal { left, right } => {
                     let bits = &self.node_bits[i];
-                    let bv_offset = writer.stream_position()?;
-                    let bv_len = bits.len();
+                    let start = global_bit_cursor;
+                    let len = bits.len();
 
-                    let mut current_base_rank = 0u64;
-
-                    if !bits.is_empty() {
-                        for chunk in bits.chunks(BITS_PER_PAGE) {
-                            writer.write_u64::<LittleEndian>(current_base_rank)?;
-
-                            let mut byte_accum = 0u8;
-                            let mut bit_count = 0;
-                            let mut page_bytes = Vec::with_capacity(PAGE_SIZE - 8);
-
-                            for &bit in chunk {
-                                if bit {
-                                    byte_accum |= 1 << bit_count;
-                                    current_base_rank += 1;
-                                }
-                                bit_count += 1;
-                                if bit_count == 8 {
-                                    page_bytes.push(byte_accum);
-                                    byte_accum = 0;
-                                    bit_count = 0;
-                                }
-                            }
-                            if bit_count > 0 {
-                                page_bytes.push(byte_accum);
-                            }
-
-                            writer.write_all(&page_bytes)?;
-
-                            // Padding
-                            let pad_len = (PAGE_SIZE - 8) - page_bytes.len();
-                            if pad_len > 0 {
-                                writer.write_all(&vec![0u8; pad_len])?;
-                            }
-                        }
+                    for &bit in bits {
+                        push_bit(bit, &mut packed_data, &mut current_byte, &mut bit_in_byte);
                     }
 
+                    global_bit_cursor += len;
                     shape_map.push(WaveletNodeShape::Internal {
-                        left_idx: left,
-                        right_idx: right,
-                        bv_offset,
-                        bv_len,
+                        left_idx: *left,
+                        right_idx: *right,
+                        bit_start: start,
+                        bit_len: len,
                     });
                 }
+            }
+        }
+
+        if bit_in_byte > 0 {
+            packed_data.push(current_byte);
+        }
+
+        // Write the global bitstream using paged layout with base-rank headers.
+        let payload_size = PAGE_SIZE - HEADER_SIZE;
+        let mut current_base_rank = 0u64;
+
+        for chunk in packed_data.chunks(payload_size) {
+            writer.write_u64::<LittleEndian>(current_base_rank)?;
+            writer.write_all(chunk)?;
+
+            for &b in chunk {
+                current_base_rank += b.count_ones() as u64;
+            }
+
+            if chunk.len() < payload_size {
+                let pad_len = payload_size - chunk.len();
+                writer.write_all(&vec![0u8; pad_len])?;
             }
         }
 
@@ -366,7 +378,7 @@ impl WaveletTreeBuilder {
 // =================================================================================
 
 pub struct PagedWaveletTree {
-    reader: PagedReader,
+    global_bv: PagedBitVector,
     nodes: Vec<WaveletNodeShape>,
     codes: [Option<HuffmanCode>; 256],
     text_len: usize,
@@ -378,9 +390,20 @@ impl PagedWaveletTree {
         nodes: Vec<WaveletNodeShape>,
         codes: [Option<HuffmanCode>; 256],
         text_len: usize,
+        wt_start_offset: u64,
     ) -> Self {
+        let total_bits = nodes
+            .iter()
+            .map(|n| match n {
+                WaveletNodeShape::Internal { bit_start, bit_len, .. } => bit_start + bit_len,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+
+        let global_bv = PagedBitVector::new(reader, wt_start_offset, total_bits);
         Self {
-            reader,
+            global_bv,
             nodes,
             codes,
             text_len,
@@ -408,19 +431,23 @@ impl PagedWaveletTree {
                 WaveletNodeShape::Internal {
                     left_idx,
                     right_idx,
-                    bv_offset,
-                    bv_len,
+                    bit_start,
+                    bit_len,
                 } => {
                     let bit = (code.bits >> depth) & 1;
                     let go_right = bit == 1;
-
-                    let bv = PagedBitVector::new(self.reader.clone(), *bv_offset, *bv_len);
+                    let global_start = *bit_start;
+                    let local_i = i.min(*bit_len);
+                    let global_pos = global_start + local_i;
+                    let rank_at_start = self.global_bv.rank1(global_start)?;
+                    let rank_at_pos = self.global_bv.rank1(global_pos)?;
+                    let ones = rank_at_pos.saturating_sub(rank_at_start);
 
                     if go_right {
-                        i = bv.rank1(i)?;
+                        i = ones;
                         curr_node_idx = *right_idx;
                     } else {
-                        i = bv.rank0(i)?;
+                        i = local_i.saturating_sub(ones);
                         curr_node_idx = *left_idx;
                     }
                 }
@@ -447,21 +474,22 @@ impl PagedWaveletTree {
                 WaveletNodeShape::Internal {
                     left_idx,
                     right_idx,
-                    bv_offset,
-                    bv_len,
+                    bit_start,
+                    bit_len,
                 } => {
-                    let bv = PagedBitVector::new(self.reader.clone(), *bv_offset, *bv_len);
-                    let bit = bv.get(i)?;
+                    let local_i = i.min(*bit_len);
+                    let global_pos = *bit_start + local_i;
+                    let bit = self.global_bv.get(global_pos)?;
+
+                    let rank_at_start = self.global_bv.rank1(*bit_start)?;
+                    let rank_at_pos = self.global_bv.rank1(global_pos)?;
+                    let ones = rank_at_pos.saturating_sub(rank_at_start);
 
                     if bit {
-                        // Bit is 1: Go Right. New index is rank1(i)
-                        // Note: access(i) tracks the position in the *child's* bitvector.
-                        // The position in the child is the count of 1s seen so far.
-                        i = bv.rank1(i)?;
+                        i = ones;
                         curr_node_idx = *right_idx;
                     } else {
-                        // Bit is 0: Go Left. New index is rank0(i)
-                        i = bv.rank0(i)?;
+                        i = local_i.saturating_sub(ones);
                         curr_node_idx = *left_idx;
                     }
                 }
@@ -487,13 +515,13 @@ mod tests {
 
         // 2. Write
         let mut file = NamedTempFile::new().unwrap();
-        let (_, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
+        let (wt_start, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
         file.as_file_mut().sync_all().unwrap();
 
         // 3. Reader Setup
         let cache = Arc::new(ShardedFastS3Fifo::new(1024 * 1024, 2));
         let reader = PagedReader::new(file.path(), 100, cache).unwrap();
-        let wt = PagedWaveletTree::new(reader, shape, codes_copy, text.len());
+        let wt = PagedWaveletTree::new(reader, shape, codes_copy, text.len(), wt_start);
 
         // 4. Verify Rank for ALL characters at ALL positions
         // This is the "Hero Test"
@@ -582,13 +610,13 @@ mod comprehensive_tests {
         let codes_copy = builder.codes;
 
         let mut file = NamedTempFile::new().unwrap();
-        let (_, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
+        let (wt_start, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
         file.as_file().sync_all().unwrap();
 
         // 3. Open Reader
         let cache = Arc::new(ShardedFastS3Fifo::new(50 * 1024 * 1024, 4));
         let reader = PagedReader::new(file.path(), seed, cache).unwrap();
-        let wt = PagedWaveletTree::new(reader, shape, codes_copy, text.len());
+        let wt = PagedWaveletTree::new(reader, shape, codes_copy, text.len(), wt_start);
 
         // 4. Verify Rank
         // Check random positions and symbols
@@ -650,12 +678,12 @@ mod comprehensive_tests {
         let codes = builder.codes;
 
         let mut file = NamedTempFile::new().unwrap();
-        let (_, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
+        let (wt_start, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
         file.as_file_mut().sync_all().unwrap();
 
         let cache = Arc::new(ShardedFastS3Fifo::new(10 * 1024 * 1024, 1));
         let reader = PagedReader::new(file.path(), 10101, cache).unwrap();
-        let wt = PagedWaveletTree::new(reader, shape, codes, len);
+        let wt = PagedWaveletTree::new(reader, shape, codes, len, wt_start);
 
         // Verify Rank at deep offsets
         // At index 80,000 (Page ~2 or 3)
@@ -681,13 +709,13 @@ mod comprehensive_tests {
 
         let mut file = NamedTempFile::new().unwrap();
         // 'builder' is moved here
-        let (_, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
+        let (wt_start, shape) = builder.write_to_file(file.as_file_mut()).unwrap();
 
         let cache = Arc::new(GlobalPageCache::new(1024, 1));
         let reader = PagedReader::new(file.path(), 0, cache).unwrap();
 
         // Use the extracted codes
-        let wt = PagedWaveletTree::new(reader, shape, codes, 0);
+        let wt = PagedWaveletTree::new(reader, shape, codes, 0, wt_start);
 
         assert_eq!(wt.rank(b'a', 0).unwrap(), 0);
     }
