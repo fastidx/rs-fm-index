@@ -64,7 +64,7 @@ rust-fm-index = { path = "..." }
 ### Build a single-document index
 
 ```rust
-use rust-fm-index::IndexBuilder;
+use rust_fm_index::IndexBuilder;
 
 let builder = IndexBuilder::new(32);
 builder.build_single_document(b"hello world", "index.idx")?;
@@ -73,7 +73,7 @@ builder.build_single_document(b"hello world", "index.idx")?;
 ### Build a multi-document index
 
 ```rust
-use rust-fm-index::IndexBuilder;
+use rust_fm_index::IndexBuilder;
 
 let docs = vec![
     b"doc one".to_vec(),
@@ -87,7 +87,7 @@ builder.build_multi_documents(&docs, "index.idx")?;
 ### Query the index
 
 ```rust
-use rust-fm-index::IndexReader;
+use rust_fm_index::IndexReader;
 
 let reader = IndexReader::open("index.idx")?;
 let (sp, ep) = reader.count(b"doc")?;
