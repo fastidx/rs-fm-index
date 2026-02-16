@@ -57,6 +57,8 @@ pub struct ShardHeader {
     pub sa_sample_rate: u32,
     pub isa_sample_rate: u32,
     pub doc_offsets_count: u32,
+    pub doc_offsets_l: u8,
+    pub doc_offsets_u_bits_len: u64,
 
     // Core Metadata
     #[serde(
@@ -76,8 +78,9 @@ pub struct ShardHeader {
     pub sa_start_offset: u64, // Where the Sampled SA integers begin
     pub isa_start_offset: u64,
 
-    // Encoded document offsets (monotonic, delta + Elias gamma)
-    pub doc_offsets_encoded: Vec<u8>,
+    // Encoded document offsets (Elias-Fano)
+    pub doc_offsets_u_bits: Vec<u8>,
+    pub doc_offsets_l_bits: Vec<u8>,
 }
 
 impl ShardHeader {
@@ -91,8 +94,8 @@ impl ShardHeader {
         doc_offsets: Vec<u64>,
     ) -> Self {
         let doc_offsets_count = doc_offsets.len() as u32;
-        let doc_offsets_encoded =
-            encode_doc_offsets(&doc_offsets).unwrap_or_else(|_| Vec::new());
+        let (doc_offsets_l, doc_offsets_u_bits_len, doc_offsets_u_bits, doc_offsets_l_bits) =
+            encode_doc_offsets_ef(&doc_offsets).unwrap_or((0, 0, Vec::new(), Vec::new()));
         Self {
             magic: MAGIC_BYTES,
             version: CURRENT_VERSION,
@@ -100,18 +103,27 @@ impl ShardHeader {
             sa_sample_rate,
             isa_sample_rate,
             doc_offsets_count,
+            doc_offsets_l,
+            doc_offsets_u_bits_len,
             c_table,
             codes,
             tree_shape,
             wt_start_offset: 0, // Placeholder, filled during write
             sa_start_offset: 0, // Placeholder
             isa_start_offset: 0,
-            doc_offsets_encoded,
+            doc_offsets_u_bits,
+            doc_offsets_l_bits,
         }
     }
 
     pub fn decode_doc_offsets(&self) -> io::Result<Vec<u64>> {
-        decode_doc_offsets(&self.doc_offsets_encoded, self.doc_offsets_count as usize)
+        decode_doc_offsets_ef(
+            self.doc_offsets_count as usize,
+            self.doc_offsets_l,
+            self.doc_offsets_u_bits_len,
+            &self.doc_offsets_u_bits,
+            &self.doc_offsets_l_bits,
+        )
     }
 }
 
@@ -183,36 +195,26 @@ impl<'a> BitReader<'a> {
     }
 }
 
-fn gamma_encode_u64(n: u64, w: &mut BitWriter) {
-    debug_assert!(n >= 1);
-    let len = 63 - n.leading_zeros() as u8;
-    for _ in 0..len {
-        w.push_bit(false);
-    }
-    for i in (0..=len).rev() {
-        w.push_bit(((n >> i) & 1) != 0);
+fn write_bits_lsb(val: u64, bits: u8, w: &mut BitWriter) {
+    for i in 0..bits {
+        w.push_bit(((val >> i) & 1) != 0);
     }
 }
 
-fn gamma_decode_u64(r: &mut BitReader) -> io::Result<u64> {
-    let mut zeros = 0u32;
-    while !r.read_bit()? {
-        zeros += 1;
-    }
-    let mut value = 1u64 << zeros;
-    for i in (0..zeros).rev() {
+fn read_bits_lsb(r: &mut BitReader, bits: u8) -> io::Result<u64> {
+    let mut val = 0u64;
+    for i in 0..bits {
         if r.read_bit()? {
-            value |= 1u64 << i;
+            val |= 1u64 << i;
         }
     }
-    Ok(value)
+    Ok(val)
 }
 
-fn encode_doc_offsets(offsets: &[u64]) -> io::Result<Vec<u8>> {
+fn encode_doc_offsets_ef(offsets: &[u64]) -> io::Result<(u8, u64, Vec<u8>, Vec<u8>)> {
     if offsets.is_empty() {
-        return Ok(Vec::new());
+        return Ok((0, 0, Vec::new(), Vec::new()));
     }
-    let mut writer = BitWriter::new();
     let mut prev = 0u64;
     for &off in offsets {
         if off < prev {
@@ -221,33 +223,90 @@ fn encode_doc_offsets(offsets: &[u64]) -> io::Result<Vec<u8>> {
                 "doc_offsets must be non-decreasing",
             ));
         }
-        let delta = off - prev;
-        let code = delta + 1; // gamma requires >= 1
-        gamma_encode_u64(code, &mut writer);
         prev = off;
     }
-    Ok(writer.finish())
+
+    let n = offsets.len() as u64;
+    let max = *offsets.last().unwrap();
+    let universe = max.saturating_add(1);
+    let avg = if n > 0 { universe / n } else { 0 };
+    let l = if avg > 0 { avg.ilog2() as u8 } else { 0 };
+
+    let lower_mask = if l == 64 { u64::MAX } else { (1u64 << l) - 1 };
+
+    let mut l_writer = BitWriter::new();
+    let mut highs: Vec<u64> = Vec::with_capacity(offsets.len());
+    for &off in offsets {
+        let low = off & lower_mask;
+        write_bits_lsb(low, l, &mut l_writer);
+        highs.push(off >> l);
+    }
+    let l_bits = l_writer.finish();
+
+    let high_last = *highs.last().unwrap_or(&0);
+    let u_bits_len = high_last + n;
+    let u_bytes_len = ((u_bits_len + 7) / 8) as usize;
+    let mut u_bits = vec![0u8; u_bytes_len];
+    for (i, &h) in highs.iter().enumerate() {
+        let pos = h + i as u64;
+        let byte = (pos / 8) as usize;
+        let bit = (pos % 8) as u8;
+        if byte < u_bits.len() {
+            u_bits[byte] |= 1 << bit;
+        }
+    }
+
+    Ok((l, u_bits_len, u_bits, l_bits))
 }
 
-fn decode_doc_offsets(encoded: &[u8], count: usize) -> io::Result<Vec<u64>> {
+fn decode_doc_offsets_ef(
+    count: usize,
+    l: u8,
+    u_bits_len: u64,
+    u_bits: &[u8],
+    l_bits: &[u8],
+) -> io::Result<Vec<u64>> {
     if count == 0 {
         return Ok(Vec::new());
     }
-    let mut reader = BitReader::new(encoded);
-    let mut offsets = Vec::with_capacity(count);
-    let mut prev = 0u64;
+
+    let mut lows = Vec::with_capacity(count);
+    let mut lr = BitReader::new(l_bits);
     for _ in 0..count {
-        let code = gamma_decode_u64(&mut reader)?;
-        if code == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid gamma code",
-            ));
+        lows.push(read_bits_lsb(&mut lr, l)?);
+    }
+
+    let mut highs = Vec::with_capacity(count);
+    let mut ones_seen = 0usize;
+    let total_bits = u_bits_len as usize;
+    for pos in 0..total_bits {
+        let byte = pos / 8;
+        let bit = pos % 8;
+        if byte >= u_bits.len() {
+            break;
         }
-        let delta = code - 1;
-        let off = prev + delta;
+        let is_one = (u_bits[byte] >> bit) & 1 == 1;
+        if is_one {
+            let high = pos as u64 - ones_seen as u64;
+            highs.push(high);
+            ones_seen += 1;
+            if highs.len() == count {
+                break;
+            }
+        }
+    }
+
+    if highs.len() != count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Elias-Fano upper bits",
+        ));
+    }
+
+    let mut offsets = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = (highs[i] << l) | lows[i];
         offsets.push(off);
-        prev = off;
     }
     Ok(offsets)
 }

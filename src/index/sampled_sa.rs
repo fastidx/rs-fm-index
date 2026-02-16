@@ -7,7 +7,7 @@ use std::mem::size_of;
 /// Accesses are cached via the underlying PagedReader.
 pub struct PagedSampledSA {
     reader: PagedReader,
-    len: usize,        // Number of elements (u32 integers)
+    len: usize,        // Number of elements (u64 integers)
     start_offset: u64, // Byte offset in the file where the SA begins
 }
 
@@ -34,7 +34,7 @@ impl PagedSampledSA {
 
     /// Get the value at index `i`.
     /// Returns io::Result in case of disk error.
-    pub fn get(&self, i: usize) -> io::Result<u32> {
+    pub fn get(&self, i: usize) -> io::Result<u64> {
         if i >= self.len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -43,37 +43,35 @@ impl PagedSampledSA {
         }
 
         // 1. Calculate Byte Offset
-        // We assume u32 for now. For >4GB files, we will need u40 or u48 packing later,
-        // but u32 covers up to 4GB shards nicely.
-        let element_size = size_of::<u32>() as u64;
+        let element_size = size_of::<u64>() as u64;
         let abs_offset = self.start_offset + (i as u64 * element_size);
 
         // 2. Read from Paged Reader
         // This handles the page alignment logic internally.
-        let bytes = self.reader.read_at(abs_offset, 4)?;
+        let bytes = self.reader.read_at(abs_offset, 8)?;
 
         // 3. Deserialize
-        Ok(LittleEndian::read_u32(&bytes))
+        Ok(LittleEndian::read_u64(&bytes))
     }
 
     /// Bulk read for range queries (optimization).
     /// useful when we narrow down a range [L, R] and need to fetch values.
-    pub fn get_range(&self, start: usize, end: usize) -> io::Result<Vec<u32>> {
+    pub fn get_range(&self, start: usize, end: usize) -> io::Result<Vec<u64>> {
         if end > self.len || start > end {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid range"));
         }
 
         let count = end - start;
-        let element_size = size_of::<u32>();
+        let element_size = size_of::<u64>();
         let abs_offset = self.start_offset + (start as u64 * element_size as u64);
         let total_bytes = count * element_size;
 
         let raw_bytes = self.reader.read_at(abs_offset, total_bytes)?;
 
-        // Convert [u8] -> [u32]
+        // Convert [u8] -> [u64]
         let mut result = Vec::with_capacity(count);
-        for chunk in raw_bytes.chunks_exact(4) {
-            result.push(LittleEndian::read_u32(chunk));
+        for chunk in raw_bytes.chunks_exact(8) {
+            result.push(LittleEndian::read_u64(chunk));
         }
 
         Ok(result)
@@ -124,11 +122,11 @@ mod tests {
 
     // Helper to generate a deterministic SA pattern
     fn generate_sa_data(count: usize) -> Vec<u8> {
-        let mut data = Vec::with_capacity(count * 4);
+        let mut data = Vec::with_capacity(count * 8);
         for i in 0..count {
             // Use a pattern that isn't just 0,1,2 to detect read errors
             // e.g., i * 10
-            let val = (i as u32).wrapping_mul(10);
+            let val = (i as u64).wrapping_mul(10);
             data.extend_from_slice(&val.to_le_bytes());
         }
         data
@@ -138,7 +136,7 @@ mod tests {
     fn test_sa_offset_and_alignment() {
         // Scenario: The SA starts 100 bytes into the file (header space).
         // It has enough elements to cross a 4KB page boundary.
-        // 4096 bytes / 4 bytes per int = 1024 ints per page.
+        // 4096 bytes / 8 bytes per int = 512 ints per page.
         // Let's write 2000 integers.
         let sa_len = 2000;
         let start_offset = 100;
@@ -167,16 +165,16 @@ mod tests {
         // Page 0 ends at 4096.
         // Our data starts at 100.
         // Space in Page 0 for data: 4096 - 100 = 3996 bytes.
-        // Ints in Page 0: 3996 / 4 = 999 integers.
-        // Index 998 is fully in Page 0.
-        // Index 999 is fully in Page 1 (starts at byte 100 + 999*4 = 4096).
+        // Ints in Page 0: 3996 / 8 = 499 integers.
+        // Index 498 is fully in Page 0.
+        // Index 499 is fully in Page 1 (starts at byte 100 + 499*8 = 4092).
 
-        assert_eq!(sa.get(998).unwrap(), 998 * 10);
-        assert_eq!(sa.get(999).unwrap(), 999 * 10); // The critical boundary check
-        assert_eq!(sa.get(1000).unwrap(), 1000 * 10);
+        assert_eq!(sa.get(498).unwrap(), 498 * 10);
+        assert_eq!(sa.get(499).unwrap(), 499 * 10); // The critical boundary check
+        assert_eq!(sa.get(500).unwrap(), 500 * 10);
 
         // 4. Verify Last Element
-        assert_eq!(sa.get(sa_len - 1).unwrap(), (sa_len as u32 - 1) * 10);
+        assert_eq!(sa.get(sa_len - 1).unwrap(), (sa_len as u64 - 1) * 10);
     }
 
     #[test]
@@ -191,8 +189,8 @@ mod tests {
         let reader = PagedReader::new(file.path(), 777, cache).unwrap();
         let sa = PagedSampledSA::new(reader, sa_len, start_offset);
 
-        // Fetch a range that spans 3 pages (4KB * 3 approx 12KB)
-        // 3000 ints * 4 = 12000 bytes.
+        // Fetch a range that spans multiple pages.
+        // 3000 ints * 8 = 24000 bytes.
         let range = sa.get_range(100, 3100).unwrap();
 
         assert_eq!(range.len(), 3000);
@@ -210,5 +208,27 @@ mod tests {
         assert_eq!(sa.len(), 0);
         assert!(sa.get(0).is_err());
         assert!(sa.get_range(0, 1).is_err());
+    }
+
+    #[test]
+    fn test_sa_u64_values() {
+        let start_offset = 0;
+        let mut file = NamedTempFile::new().unwrap();
+        let count = 16;
+        let base = u32::MAX as u64 + 123;
+        let mut data = Vec::with_capacity(count * 8);
+        for i in 0..count {
+            let val = base + i as u64;
+            data.extend_from_slice(&val.to_le_bytes());
+        }
+        file.write_all(&data).unwrap();
+        file.as_file().sync_all().unwrap();
+
+        let cache = Arc::new(GlobalPageCache::new(1024 * 1024, 1));
+        let reader = PagedReader::new(file.path(), 9999, cache).unwrap();
+        let sa = PagedSampledSA::new(reader, count, start_offset);
+
+        assert_eq!(sa.get(0).unwrap(), base);
+        assert_eq!(sa.get(count - 1).unwrap(), base + (count as u64 - 1));
     }
 }

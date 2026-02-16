@@ -158,9 +158,9 @@ impl QueryEngine {
         }
 
         let sample_idx = row / sample_rate;
-        let sa_val = self.sa.get(sample_idx)?;
-
-        Ok((sa_val as usize + steps) % self.text_len)
+        let sa_val = self.sa.get(sample_idx)? as u64;
+        let text_len = self.text_len as u64;
+        Ok(((sa_val + steps as u64) % text_len) as usize)
     }
 
     /// Helper: Get ISA[i] (The BWT row corresponding to text position i)

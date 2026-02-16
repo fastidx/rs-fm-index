@@ -126,7 +126,8 @@ Each `.idx` shard contains:
 4. Sampled ISA (u32)
 5. Doc offsets encoded with **delta + Elias gamma**
 
-Doc offsets let you map search hits to document IDs without scanning the text.
+Doc offsets are encoded with Elias-Fano to support compact storage and fast mapping from
+global offsets to document IDs.
 
 ---
 

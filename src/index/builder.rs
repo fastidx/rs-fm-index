@@ -68,21 +68,21 @@ impl ShardBuilder {
         // We build this in memory. For 1GB text, this is 1GB BWT.
         let len = text.len();
         let mut bwt = Vec::with_capacity(len);
-        let mut sa_u32 = Vec::with_capacity(len); // Keep SA for sampling
+        let mut sa_u64 = Vec::with_capacity(len); // Keep SA for sampling
 
         // NEW: ISA Vector
         // We need the full ISA in memory to sample it, or we can construct it
         // sparsely if we iterate carefuly. But for 1GB chunks, efficient
         // random access construction is needed.
         // ISA[SA[i]] = i.
-        let mut isa_u32 = vec![0u32; len];
+        let mut isa_u64 = vec![0u64; len];
 
         for (row_idx, &sa_val) in sa_i32.iter().enumerate() {
             let pos = sa_val as usize; // Cast i32 -> usize
-            sa_u32.push(pos as u32); // Store as u32 for index
+            sa_u64.push(pos as u64); // Store as u64 for index
 
             // Build ISA: Map "Text Position" -> "BWT Row Index"
-            isa_u32[pos] = row_idx as u32;
+            isa_u64[pos] = row_idx as u64;
 
             if pos == 0 {
                 // In BWT, the char "before" the start is the last char
@@ -136,7 +136,7 @@ impl ShardBuilder {
 
         // Compute offsets for SA/ISA
         let sa_len = (len + self.sample_rate as usize - 1) / self.sample_rate as usize;
-        let sa_bytes_len = sa_len as u64 * 4;
+        let sa_bytes_len = sa_len as u64 * 8;
 
         header.tree_shape = tree_shape;
         header.wt_start_offset = header_size;
@@ -157,19 +157,19 @@ impl ShardBuilder {
         writer.write_all(&wt_bytes)?;
 
         // 7. Write Sampled Suffix Array (SA)
-        let mut int_buffer = [0u8; 4]; // Buffer for u32
+        let mut int_buffer = [0u8; 8]; // Buffer for u64
 
-        for (i, &sa_val) in sa_u32.iter().enumerate() {
+        for (i, &sa_val) in sa_u64.iter().enumerate() {
             if i % (self.sample_rate as usize) == 0 {
-                LittleEndian::write_u32(&mut int_buffer, sa_val);
+                LittleEndian::write_u64(&mut int_buffer, sa_val);
                 writer.write_all(&int_buffer)?;
             }
         }
 
         // 8. Write Sampled Inverse Suffix Array (ISA)
-        for (i, &isa_val) in isa_u32.iter().enumerate() {
+        for (i, &isa_val) in isa_u64.iter().enumerate() {
             if i % (self.sample_rate as usize) == 0 {
-                LittleEndian::write_u32(&mut int_buffer, isa_val);
+                LittleEndian::write_u64(&mut int_buffer, isa_val);
                 writer.write_all(&int_buffer)?;
             }
         }

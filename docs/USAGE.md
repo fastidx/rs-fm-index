@@ -131,4 +131,5 @@ let reader = IndexReader::open_with_cache("index.idx", 512 * 1024 * 1024, 16)?;
 ## Common Pitfalls
 
 - If extraction doesn’t reproduce the original file, check sentinel handling.
+- Doc offsets are Elias-Fano encoded; if you manually construct headers, keep offsets sorted.
 - If queries return zero results, verify the input text was built with a sentinel.
