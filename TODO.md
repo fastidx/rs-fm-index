@@ -43,11 +43,11 @@
 
 ## Phase 5: 200TB-Scale Readiness (Next)
 
-- [ ] **64-bit SA/ISA:** Move from u32 to u64 (or u40/u48 packing) for >4GB shards.
+- [x] **64-bit SA/ISA:** Move from u32 to u64 (or u40/u48 packing) for >4GB shards.
 - [ ] **External-memory SA/BWT:** Replace in-memory `cdivsufsort` with an external-memory algorithm.
 - [ ] **Streaming Build:** Avoid materializing full BWT/bitvectors; stream into pages.
 - [ ] **Compressed SA/ISA:** Delta + varint/Rice/PFor for sampled arrays.
 - [ ] **Run-Length BWT / R-Index:** Replace Huffman WT with RLBWT or wavelet matrix of runs.
 - [ ] **Shard & Merge:** Partition documents into shards, add a top-level routing layer.
-- [ ] **Doc Offsets Indexing:** Elias-Fano or sampled index for fast doc_id lookup at scale.
+- [x] **Doc Offsets Indexing:** Elias-Fano or sampled index for fast doc_id lookup at scale.
 - [ ] **I/O Pipeline:** Async prefetch, large sequential reads, configurable page size.

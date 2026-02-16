@@ -60,7 +60,7 @@ fn test_header_roundtrip() {
         WaveletNodeShape::Leaf { symbol: 255 },
     ];
 
-    let doc_offsets = vec![0u64, 5, 10];
+    let doc_offsets = vec![0u64, 5, 10, 20, 21];
     let mut header = ShardHeader::new(101, 4, 4, c_table, codes, tree_shape.clone(), doc_offsets.clone());
     header.wt_start_offset = 777;
     header.sa_start_offset = 888;
@@ -101,8 +101,8 @@ fn test_builder_offsets_and_lengths() {
     assert_eq!(header.wt_start_offset, header_size);
 
     let file_len = std::fs::metadata(tmp_file.path()).unwrap().len();
-    let expected_sa_bytes = sample_count(text.len(), sample_rate) as u64 * 4;
-    let expected_isa_bytes = sample_count(text.len(), header.isa_sample_rate) as u64 * 4;
+    let expected_sa_bytes = sample_count(text.len(), sample_rate) as u64 * 8;
+    let expected_isa_bytes = sample_count(text.len(), header.isa_sample_rate) as u64 * 8;
     assert_eq!(header.isa_start_offset, header.sa_start_offset + expected_sa_bytes);
     assert_eq!(header.isa_start_offset + expected_isa_bytes, file_len);
 }
@@ -123,10 +123,10 @@ fn test_sampled_sa_matches_reference() {
     let sa = PagedSampledSA::new(reader, sa_len, header.sa_start_offset);
 
     let (_, full_sa) = div_sort(text).into_parts();
-    let expected: Vec<u32> = full_sa
+    let expected: Vec<u64> = full_sa
         .iter()
         .step_by(sample_rate as usize)
-        .map(|&v| v as u32)
+        .map(|&v| v as u64)
         .collect();
 
     assert_eq!(expected.len(), sa_len);
