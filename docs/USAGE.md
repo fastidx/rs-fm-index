@@ -7,22 +7,27 @@ This guide covers common usage patterns for both CLI and library integration.
 ## CLI Workflows
 
 ### Single Document
+
 Build:
+
 ```
 cargo run --release -- build ./input.txt ./index.idx
 ```
 
 Query:
+
 ```
 cargo run --release -- query ./index.idx "pattern"
 ```
 
 Extract:
+
 ```
 cargo run --release -- extract ./index.idx 100 64
 ```
 
 Extract full document:
+
 ```
 cargo run --release -- doc ./index.idx 0 > recovered.txt
 ```
@@ -30,12 +35,15 @@ cargo run --release -- doc ./index.idx 0 > recovered.txt
 ---
 
 ### Multiple Documents
+
 Build a multi-doc index:
+
 ```
 cargo run --release -- build-multi ./index.idx ./doc1.txt ./doc2.txt ./doc3.txt
 ```
 
 Query and map to document:
+
 ```
 cargo run --release -- query ./index.idx "search"
 ```
@@ -43,6 +51,7 @@ cargo run --release -- query ./index.idx "search"
 The CLI prints the first few positions and their `(doc_id, offset)` pairs.
 
 Extract a full document:
+
 ```
 cargo run --release -- doc ./index.idx 2 > doc3.txt
 ```
@@ -52,16 +61,18 @@ cargo run --release -- doc ./index.idx 2 > doc3.txt
 ## Library Integration
 
 ### Build a single-doc index
+
 ```rust
-use wavelet_tree_encoding::IndexBuilder;
+use rust-fm-index::IndexBuilder;
 
 let builder = IndexBuilder::new(32);
 builder.build_single_document(b"hello world", "index.idx")?;
 ```
 
 ### Build a multi-doc index
+
 ```rust
-use wavelet_tree_encoding::IndexBuilder;
+use rust-fm-index::IndexBuilder;
 
 let docs = vec![
     b"doc1".to_vec(),
@@ -73,8 +84,9 @@ builder.build_multi_documents(&docs, "index.idx")?;
 ```
 
 ### Open and query
+
 ```rust
-use wavelet_tree_encoding::IndexReader;
+use rust-fm-index::IndexReader;
 
 let reader = IndexReader::open("index.idx")?;
 
@@ -89,6 +101,7 @@ if let Some(pos) = locs.first() {
 ```
 
 ### Reconstruct a document
+
 ```rust
 let doc = reader.get_document(0)?;
 ```

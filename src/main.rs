@@ -7,7 +7,7 @@ use std::env;
 use std::io::Write;
 use std::time::Instant;
 
-use wavelet_tree_encoding::{IndexBuilder, IndexReader};
+use rust_fm_index::{IndexBuilder, IndexReader};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
