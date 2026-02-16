@@ -38,6 +38,12 @@ cargo run --release -- query <index_file> <pattern>
 cargo run --release -- extract <index_file> <pos> <len>
 ```
 
+### Show index size breakdown
+
+```
+cargo run --release -- stats <index_file>
+```
+
 ### Extract an entire document by doc_id
 
 ```
@@ -93,6 +99,9 @@ let reader = IndexReader::open("index.idx")?;
 let (sp, ep) = reader.count(b"doc")?;
 let locs = reader.locate(b"doc")?;
 let snippet = reader.extract(0, 5)?;
+
+let stats = reader.stats()?;
+println!("{stats:?}");
 ```
 
 ### Map positions to documents + reconstruct full docs
@@ -122,9 +131,9 @@ Each `.idx` shard contains:
 
 1. Header (bincode, legacy config)
 2. Global Wavelet Tree bitstream (paged with base-rank headers)
-3. Sampled SA (u32)
-4. Sampled ISA (u32)
-5. Doc offsets encoded with **delta + Elias gamma**
+3. Sampled SA (u64)
+4. Sampled ISA (u64)
+5. Doc offsets encoded with **Elias-Fano**
 
 Doc offsets are encoded with Elias-Fano to support compact storage and fast mapping from
 global offsets to document IDs.

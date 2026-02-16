@@ -26,6 +26,12 @@ Extract:
 cargo run --release -- extract ./index.idx 100 64
 ```
 
+Stats:
+
+```
+cargo run --release -- stats ./index.idx
+```
+
 Extract full document:
 
 ```
@@ -98,6 +104,9 @@ if let Some(pos) = locs.first() {
         println!("doc_id={}, offset={}", doc_id, offset);
     }
 }
+
+let stats = reader.stats()?;
+println!("{stats:?}");
 ```
 
 ### Reconstruct a document

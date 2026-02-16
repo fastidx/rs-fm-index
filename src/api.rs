@@ -110,6 +110,24 @@ impl IndexBuilder {
 pub struct IndexReader {
     header: ShardHeader,
     engine: QueryEngine,
+    index_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexStats {
+    pub text_bytes: u64,
+    pub index_bytes: u64,
+    pub header_bytes: u64,
+    pub wavelet_bytes: u64,
+    pub sa_bytes: u64,
+    pub isa_bytes: u64,
+    pub sa_samples: u64,
+    pub isa_samples: u64,
+    pub sa_sample_rate: u32,
+    pub isa_sample_rate: u32,
+    pub doc_offsets_count: u32,
+    pub doc_offsets_u_bits_bytes: u64,
+    pub doc_offsets_l_bits_bytes: u64,
 }
 
 impl IndexReader {
@@ -125,6 +143,7 @@ impl IndexReader {
         cache_shards: usize,
     ) -> io::Result<Self> {
         let path_ref = path.as_ref();
+        let index_bytes = std::fs::metadata(path_ref)?.len();
         let mut file = std::fs::File::open(path_ref)?;
         let header: ShardHeader =
             bincode::serde::decode_from_std_read(&mut file, bincode::config::legacy())
@@ -138,7 +157,11 @@ impl IndexReader {
 
         let reader = PagedReader::new(path_ref, file_id, cache)?;
         let engine = QueryEngine::new(header.clone(), reader);
-        Ok(Self { header, engine })
+        Ok(Self {
+            header,
+            engine,
+            index_bytes,
+        })
     }
 
     pub fn header(&self) -> &ShardHeader {
@@ -168,6 +191,64 @@ impl IndexReader {
     pub fn doc_count(&self) -> io::Result<usize> {
         let offsets = self.header.decode_doc_offsets()?;
         Ok(offsets.len())
+    }
+
+    pub fn stats(&self) -> io::Result<IndexStats> {
+        let header_bytes = bincode::serde::encode_to_vec(&self.header, bincode::config::legacy())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .len() as u64;
+
+        if self.header.wt_start_offset < header_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header offsets are inconsistent",
+            ));
+        }
+
+        let wt_start = self.header.wt_start_offset;
+        let sa_start = self.header.sa_start_offset;
+        let isa_start = self.header.isa_start_offset;
+
+        if wt_start > sa_start || sa_start > isa_start || isa_start > self.index_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index offsets exceed file size",
+            ));
+        }
+
+        let wavelet_bytes = sa_start.saturating_sub(wt_start);
+        let sa_bytes = isa_start.saturating_sub(sa_start);
+        let isa_bytes = self.index_bytes.saturating_sub(isa_start);
+
+        let text_bytes = self.header.text_len;
+        let sa_sample_rate = self.header.sa_sample_rate;
+        let isa_sample_rate = self.header.isa_sample_rate;
+        let sa_samples = if sa_sample_rate == 0 {
+            0
+        } else {
+            (text_bytes + sa_sample_rate as u64 - 1) / sa_sample_rate as u64
+        };
+        let isa_samples = if isa_sample_rate == 0 {
+            0
+        } else {
+            (text_bytes + isa_sample_rate as u64 - 1) / isa_sample_rate as u64
+        };
+
+        Ok(IndexStats {
+            text_bytes,
+            index_bytes: self.index_bytes,
+            header_bytes,
+            wavelet_bytes,
+            sa_bytes,
+            isa_bytes,
+            sa_samples,
+            isa_samples,
+            sa_sample_rate,
+            isa_sample_rate,
+            doc_offsets_count: self.header.doc_offsets_count,
+            doc_offsets_u_bits_bytes: self.header.doc_offsets_u_bits.len() as u64,
+            doc_offsets_l_bits_bytes: self.header.doc_offsets_l_bits.len() as u64,
+        })
     }
 }
 
