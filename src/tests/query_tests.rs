@@ -37,6 +37,19 @@ fn naive_locations(text: &[u8], pattern: &[u8]) -> Vec<usize> {
     out
 }
 
+fn naive_count(text: &[u8], pattern: &[u8]) -> usize {
+    if pattern.is_empty() || pattern.len() > text.len() {
+        return 0;
+    }
+    let mut count = 0;
+    for i in 0..=text.len() - pattern.len() {
+        if &text[i..i + pattern.len()] == pattern {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[test]
 fn test_search_mississippi() {
     // 1. Build Index
@@ -111,4 +124,68 @@ fn test_query_edge_cases() {
 
     let (sp_none, ep_none) = query.count(b"b").unwrap();
     assert!(sp_none > ep_none);
+}
+
+#[test]
+fn test_query_10mb_file() {
+    let total_len = 10 * 1024 * 1024; // 10MB total, including sentinel
+    let data_len = total_len - 1;
+    let base = b"abcd";
+
+    let mut text = Vec::with_capacity(total_len);
+    while text.len() < data_len {
+        let remaining = data_len - text.len();
+        if remaining >= base.len() {
+            text.extend_from_slice(base);
+        } else {
+            text.extend_from_slice(&base[..remaining]);
+        }
+    }
+
+    let marker1 = [200u8, 201, 202, 203, 204];
+    let marker2 = [210u8, 211, 212, 213, 214];
+    let marker3 = [220u8, 221, 222, 223, 224];
+
+    let pos1 = 12345usize;
+    let pos2 = data_len / 2;
+    let pos3 = data_len - marker3.len() - 123;
+
+    text[pos1..pos1 + marker1.len()].copy_from_slice(&marker1);
+    text[pos2..pos2 + marker2.len()].copy_from_slice(&marker2);
+    text[pos3..pos3 + marker3.len()].copy_from_slice(&marker3);
+
+    text.push(0); // sentinel
+
+    let sample_rate = 64;
+    let builder = ShardBuilder::new(sample_rate);
+    let tmp_file = NamedTempFile::new().unwrap();
+    builder.build(&text, tmp_file.path()).unwrap();
+
+    let header = decode_header_from_path(tmp_file.path());
+    let cache = Arc::new(GlobalPageCache::new(32 * 1024 * 1024, 2));
+    let reader = PagedReader::new(tmp_file.path(), 5678, cache).unwrap();
+    let query = QueryEngine::new(header, reader);
+
+    // Count checks (BWT-based)
+    let expected_abcd = naive_count(&text, base);
+    let (sp_abcd, ep_abcd) = query.count(base).unwrap();
+    let count_abcd = if sp_abcd > ep_abcd {
+        0
+    } else {
+        ep_abcd - sp_abcd + 1
+    };
+    assert_eq!(count_abcd, expected_abcd);
+
+    let (sp_none, ep_none) = query.count(&[250, 251, 252]).unwrap();
+    assert!(sp_none > ep_none);
+
+    // Locate checks for unique markers
+    let locs1 = query.locate(&marker1).unwrap();
+    assert_eq!(locs1, vec![pos1]);
+
+    let locs2 = query.locate(&marker2).unwrap();
+    assert_eq!(locs2, vec![pos2]);
+
+    let locs3 = query.locate(&marker3).unwrap();
+    assert_eq!(locs3, vec![pos3]);
 }
