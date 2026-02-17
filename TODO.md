@@ -32,7 +32,11 @@
   - [x] Build the Wavelet Tree in memory.
   - [x] **Page Writer:** Serialize the in-memory tree into the Paged Format on disk.
   - [x] **Sampled ISA:** Build and store sampled inverse suffix array.
-  - [x] **Doc Offsets:** Encode and store doc offsets (delta + Elias gamma).
+  - [x] **Doc Offsets:** Encode and store doc offsets (Elias-Fano).
+- [x] **Distributed Ingestion (Sharded):**
+  - [x] Chunk input files into size-bounded shards with per-segment metadata.
+  - [x] Parallel shard builds with a worker pool.
+  - [x] Emit per-shard stats/meta and a top-level ingest report.
 
 ## Phase 4: Search & Optimization
 
@@ -48,6 +52,6 @@
 - [ ] **Streaming Build:** Avoid materializing full BWT/bitvectors; stream into pages.
 - [ ] **Compressed SA/ISA:** Delta + varint/Rice/PFor for sampled arrays.
 - [ ] **Run-Length BWT / R-Index:** Replace Huffman WT with RLBWT or wavelet matrix of runs.
-- [ ] **Shard & Merge:** Partition documents into shards, add a top-level routing layer.
+- [ ] **Shard Routing & Merge:** Top-level routing layer and multi-shard query/merge.
 - [x] **Doc Offsets Indexing:** Elias-Fano or sampled index for fast doc_id lookup at scale.
 - [ ] **I/O Pipeline:** Async prefetch, large sequential reads, configurable page size.
