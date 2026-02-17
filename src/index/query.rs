@@ -24,8 +24,7 @@ impl QueryEngine {
         );
 
         // Initialize Sampled SA Reader
-        let sa_len = (header.text_len as usize + header.sa_sample_rate as usize - 1)
-            / header.sa_sample_rate as usize;
+        let sa_len = (header.text_len as usize).div_ceil(header.sa_sample_rate as usize);
         let sa = PagedSampledSA::new(
             reader.clone(),
             sa_len,
@@ -34,8 +33,7 @@ impl QueryEngine {
         );
 
         // Initialize Sampled ISA Reader
-        let isa_len = (header.text_len as usize + header.isa_sample_rate as usize - 1)
-            / header.isa_sample_rate as usize;
+        let isa_len = (header.text_len as usize).div_ceil(header.isa_sample_rate as usize);
         let isa = PagedSampledSA::new(
             reader.clone(),
             isa_len,
@@ -156,7 +154,7 @@ impl QueryEngine {
         let sample_rate = self.header.sa_sample_rate as usize;
         let mut steps = 0;
 
-        while row % sample_rate != 0 {
+        while !row.is_multiple_of(sample_rate) {
             // LF Step: Go backwards in text
             let c = self.wt.access(row)?;
             let c_idx = c as usize;
@@ -168,7 +166,7 @@ impl QueryEngine {
         }
 
         let sample_idx = row / sample_rate;
-        let sa_val = self.sa.get(sample_idx)? as u64;
+        let sa_val = self.sa.get(sample_idx)?;
         let text_len = self.text_len as u64;
         Ok(((sa_val + steps as u64) % text_len) as usize)
     }
@@ -191,7 +189,7 @@ impl QueryEngine {
         // Wait: LF(ISA[i+1]) = ISA[i].
         // So if we find ISA[i+k], we can apply LF k times to get ISA[i].
 
-        while curr % rate != 0 {
+        while !curr.is_multiple_of(rate) {
             curr += 1;
             steps += 1;
             if curr >= self.text_len {

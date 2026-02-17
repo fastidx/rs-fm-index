@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use rust_fm_index::ingest::config::{parse_size, size_value_to_usize, IngestConfigFile};
+use rust_fm_index::ingest::config::{IngestConfigFile, parse_size, size_value_to_usize};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
 use rust_fm_index::{IndexBuilder, IndexReader, MultiShardReader};
 use std::io::Write;
@@ -199,14 +199,30 @@ fn run_stats(args: StatsArgs) {
     match engine.stats() {
         Ok(s) => {
             println!("Index stats for {:?}", args.index);
-            println!("Text bytes: {} ({})", s.text_bytes, format_bytes(s.text_bytes));
-            println!("Index bytes: {} ({})", s.index_bytes, format_bytes(s.index_bytes));
+            println!(
+                "Text bytes: {} ({})",
+                s.text_bytes,
+                format_bytes(s.text_bytes)
+            );
+            println!(
+                "Index bytes: {} ({})",
+                s.index_bytes,
+                format_bytes(s.index_bytes)
+            );
             if s.text_bytes > 0 {
                 let ratio = s.index_bytes as f64 / s.text_bytes as f64;
                 println!("Index/Text ratio: {:.3}", ratio);
             }
-            println!("Header bytes: {} ({})", s.header_bytes, format_bytes(s.header_bytes));
-            println!("Wavelet bytes: {} ({})", s.wavelet_bytes, format_bytes(s.wavelet_bytes));
+            println!(
+                "Header bytes: {} ({})",
+                s.header_bytes,
+                format_bytes(s.header_bytes)
+            );
+            println!(
+                "Wavelet bytes: {} ({})",
+                s.wavelet_bytes,
+                format_bytes(s.wavelet_bytes)
+            );
             println!("SA bytes: {} ({})", s.sa_bytes, format_bytes(s.sa_bytes));
             println!("ISA bytes: {} ({})", s.isa_bytes, format_bytes(s.isa_bytes));
             println!("SA sample rate: {}", s.sa_sample_rate);
@@ -351,26 +367,24 @@ fn run_ingest(args: IngestArgs) {
         parse_size("8MiB").expect("default read buffer")
     };
 
-    let workers = if let Some(v) = args.workers {
-        v
-    } else if let Some(v) = file_cfg.as_ref().and_then(|c| c.num_workers) {
-        v
-    } else {
-        4
-    };
+    let workers = args
+        .workers
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.num_workers))
+        .unwrap_or(4);
 
-    let sample_rate = if let Some(v) = args.sample_rate {
-        v
-    } else if let Some(v) = file_cfg.as_ref().and_then(|c| c.sample_rate) {
-        v
-    } else {
-        32
-    };
+    let sample_rate = args
+        .sample_rate
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.sample_rate))
+        .unwrap_or(32);
 
     println!("Starting distributed ingestion");
     println!("Patterns: {:?}", input_patterns);
     println!("Output: {:?}", output_dir);
-    println!("Chunk size: {} ({})", chunk_size, format_bytes(chunk_size as u64));
+    println!(
+        "Chunk size: {} ({})",
+        chunk_size,
+        format_bytes(chunk_size as u64)
+    );
     println!(
         "Read buffer: {} ({})",
         read_buffer,

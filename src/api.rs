@@ -248,12 +248,12 @@ impl IndexReader {
         let sa_samples = if sa_sample_rate == 0 {
             0
         } else {
-            (text_bytes + sa_sample_rate as u64 - 1) / sa_sample_rate as u64
+            text_bytes.div_ceil(sa_sample_rate as u64)
         };
         let isa_samples = if isa_sample_rate == 0 {
             0
         } else {
-            (text_bytes + isa_sample_rate as u64 - 1) / isa_sample_rate as u64
+            text_bytes.div_ceil(isa_sample_rate as u64)
         };
 
         Ok(IndexStats {

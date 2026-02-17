@@ -61,17 +61,17 @@ fn test_header_roundtrip() {
     ];
 
     let doc_offsets = vec![0u64, 5, 10, 20, 21];
-    let mut header = ShardHeader::new(
-        101,
-        4,
-        4,
-        0,
-        0,
+    let mut header = ShardHeader::new(crate::index::header::ShardHeaderParams {
+        text_len: 101,
+        sa_sample_rate: 4,
+        isa_sample_rate: 4,
+        sa_bits: 0,
+        isa_bits: 0,
         c_table,
         codes,
-        tree_shape.clone(),
-        doc_offsets.clone(),
-    );
+        tree_shape: tree_shape.clone(),
+        doc_offsets: doc_offsets.clone(),
+    });
     header.wt_start_offset = 777;
     header.sa_start_offset = 888;
 

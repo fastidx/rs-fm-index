@@ -19,9 +19,7 @@ pub struct ShardHit {
 #[derive(Debug, Clone)]
 struct SegmentRef {
     shard_idx: usize,
-    segment_idx: usize,
     part_index: u32,
-    doc_offset: u64,
     len: u64,
     shard_offset: u64,
 }
@@ -69,15 +67,13 @@ impl MultiShardReader {
             let reader = IndexReader::open_with_shared_cache(&index_path, cache.clone())?;
 
             let shard_idx = shards.len();
-            for (segment_idx, seg) in meta.segments.iter().enumerate() {
+            for seg in meta.segments.iter() {
                 doc_segments
                     .entry(seg.doc_id)
                     .or_default()
                     .push(SegmentRef {
                         shard_idx,
-                        segment_idx,
                         part_index: seg.part_index,
-                        doc_offset: seg.doc_offset,
                         len: seg.len,
                         shard_offset: seg.shard_offset,
                     });
@@ -121,16 +117,16 @@ impl MultiShardReader {
         for shard in &self.shards {
             let locs = shard.reader.locate(pattern)?;
             for pos in locs {
-                if let Some((seg_idx, seg_offset)) = shard.reader.pos_to_doc_id(pos) {
-                    if let Some(seg) = shard.segments.get(seg_idx) {
-                        let doc_offset = seg.doc_offset + seg_offset as u64;
-                        hits.push(ShardHit {
-                            shard_id: shard.shard_id,
-                            shard_pos: pos,
-                            doc_id: seg.doc_id,
-                            doc_offset,
-                        });
-                    }
+                if let Some((seg_idx, seg_offset)) = shard.reader.pos_to_doc_id(pos)
+                    && let Some(seg) = shard.segments.get(seg_idx)
+                {
+                    let doc_offset = seg.doc_offset + seg_offset as u64;
+                    hits.push(ShardHit {
+                        shard_id: shard.shard_id,
+                        shard_pos: pos,
+                        doc_id: seg.doc_id,
+                        doc_offset,
+                    });
                 }
             }
         }
@@ -164,10 +160,11 @@ fn collect_meta_paths(dir: &Path) -> io::Result<Vec<PathBuf>> {
         if !path.is_file() {
             continue;
         }
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            if name.starts_with("shard_") && name.ends_with(".meta.json") {
-                out.push(path);
-            }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str())
+            && name.starts_with("shard_")
+            && name.ends_with(".meta.json")
+        {
+            out.push(path);
         }
     }
     out.sort();

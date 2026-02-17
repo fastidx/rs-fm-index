@@ -21,10 +21,10 @@ impl PagedSampledSA {
         let byte_len = if bits == 0 {
             len as u64 * 8
         } else if bits <= 32 {
-            let words = ((len as u64 * bits as u64) + 31) / 32;
+            let words = (len as u64 * bits as u64).div_ceil(32);
             words * 4
         } else {
-            let words = ((len as u64 * bits as u64) + 63) / 64;
+            let words = (len as u64 * bits as u64).div_ceil(64);
             words * 8
         };
         Self {
@@ -68,7 +68,7 @@ impl PagedSampledSA {
             let bit_offset = i as u64 * self.bits as u64;
             let byte_offset = bit_offset / 8;
             let bit_in_byte = (bit_offset % 8) as u32;
-            let bytes_needed = ((bit_in_byte as u64 + self.bits as u64 + 7) / 8) as usize;
+            let bytes_needed = (bit_in_byte as u64 + self.bits as u64).div_ceil(8) as usize;
 
             if byte_offset + bytes_needed as u64 > self.byte_len {
                 return Err(io::Error::new(
