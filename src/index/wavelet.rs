@@ -3,7 +3,7 @@ use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 // --- Constants ---
 const PAGE_SIZE: usize = 4096;
@@ -116,7 +116,7 @@ fn count_freq(data: &[u8]) -> [u64; 256] {
     f
 }
 
-fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
+pub(crate) fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
     let mut heap = BinaryHeap::new();
     let mut nodes = Vec::new();
 
@@ -225,6 +225,46 @@ impl WaveletTreeBuilder {
         let lens = huffman_lengths(&freq);
         let codes = canonical_codes(&lens);
 
+        let nodes = Self::build_nodes(&codes);
+        let node_count = nodes.len();
+        Self {
+            codes,
+            node_bits: vec![Vec::new(); node_count],
+            nodes,
+        }
+    }
+
+    pub fn from_codes(codes: [Option<HuffmanCode>; 256]) -> Self {
+        let nodes = Self::build_nodes(&codes);
+        let node_count = nodes.len();
+        Self {
+            codes,
+            node_bits: vec![Vec::new(); node_count],
+            nodes,
+        }
+    }
+
+    pub fn process_text(&mut self, data: &[u8]) {
+        for &b in data {
+            self.process_byte(b);
+        }
+    }
+
+    pub fn process_reader<R: Read>(&mut self, mut reader: R) -> io::Result<()> {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                self.process_byte(b);
+            }
+        }
+        Ok(())
+    }
+
+    fn build_nodes(codes: &[Option<HuffmanCode>; 256]) -> Vec<BuilderNode> {
         let mut nodes = vec![BuilderNode::Internal { left: 0, right: 0 }];
 
         for (sym, code) in codes.iter().enumerate() {
@@ -268,28 +308,21 @@ impl WaveletTreeBuilder {
             }
         }
 
-        let node_count = nodes.len();
-        Self {
-            codes,
-            node_bits: vec![Vec::new(); node_count],
-            nodes,
-        }
+        nodes
     }
 
-    pub fn process_text(&mut self, data: &[u8]) {
-        for &b in data {
-            let code = self.codes[b as usize].unwrap();
-            let mut curr = 0;
-            for depth in (0..code.len).rev() {
-                let bit = (code.bits >> depth) & 1;
-                self.node_bits[curr].push(bit == 1);
+    fn process_byte(&mut self, b: u8) {
+        let code = self.codes[b as usize].unwrap();
+        let mut curr = 0;
+        for depth in (0..code.len).rev() {
+            let bit = (code.bits >> depth) & 1;
+            self.node_bits[curr].push(bit == 1);
 
-                match self.nodes[curr] {
-                    BuilderNode::Internal { left, right } => {
-                        curr = if bit == 0 { left } else { right };
-                    }
-                    _ => break,
+            match self.nodes[curr] {
+                BuilderNode::Internal { left, right } => {
+                    curr = if bit == 0 { left } else { right };
                 }
+                _ => break,
             }
         }
     }
