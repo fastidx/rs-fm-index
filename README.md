@@ -91,10 +91,16 @@ And a summary report:
 
 - `ingest_report.json`
 
-Query across shards (pass the shard directory):
+Query across shards (pass the shard directory; `query` auto-detects dirs):
 
 ```
 cargo run --release -- query ./shards "search"
+```
+
+Extract a document from shards:
+
+```
+cargo run --release -- doc ./shards 2 > doc3.txt
 ```
 
 ---

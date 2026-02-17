@@ -174,6 +174,8 @@ fn collect_meta_paths(dir: &Path) -> io::Result<Vec<PathBuf>> {
 fn resolve_index_path(meta_path: &Path, index_path: &Path) -> PathBuf {
     if index_path.is_absolute() {
         index_path.to_path_buf()
+    } else if index_path.exists() {
+        index_path.to_path_buf()
     } else {
         meta_path
             .parent()
