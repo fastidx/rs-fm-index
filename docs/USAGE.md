@@ -86,10 +86,22 @@ cargo run --release -- query ./index.idx "search"
 
 The CLI prints the first few positions and their `(doc_id, offset)` pairs.
 
+Query a shard directory:
+
+```
+cargo run --release -- query ./shards "search"
+```
+
 Extract a full document:
 
 ```
 cargo run --release -- doc ./index.idx 2 > doc3.txt
+```
+
+Extract a full document from shards:
+
+```
+cargo run --release -- doc ./shards 2 > doc3.txt
 ```
 
 ---

@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use rust_fm_index::ingest::config::{parse_size, size_value_to_usize, IngestConfigFile};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
-use rust_fm_index::{IndexBuilder, IndexReader};
+use rust_fm_index::{IndexBuilder, IndexReader, MultiShardReader};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -117,6 +117,11 @@ fn run_build(args: BuildArgs) {
 }
 
 fn run_query(args: QueryArgs) {
+    if args.index.is_dir() {
+        run_query_shards(args);
+        return;
+    }
+
     let engine = IndexReader::open(&args.index).expect("Failed to open index");
     let start = Instant::now();
 
@@ -139,6 +144,38 @@ fn run_query(args: QueryArgs) {
                         }
                     }
                 }
+            }
+        }
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+fn run_query_shards(args: QueryArgs) {
+    let router = MultiShardReader::open(&args.index).expect("Failed to open shard directory");
+    let start = Instant::now();
+
+    match router.count(args.pattern.as_bytes()) {
+        Ok(count) => {
+            if count == 0 {
+                println!("Pattern not found.");
+                return;
+            }
+
+            println!(
+                "Found {} occurrences across {} shards in {:.2?}",
+                count,
+                router.shard_count(),
+                start.elapsed()
+            );
+
+            let hits = router.locate(args.pattern.as_bytes()).unwrap_or_default();
+            let preview = hits.iter().take(5).collect::<Vec<_>>();
+            println!("Locations (first 5): {:?}", preview);
+            for hit in preview {
+                println!(
+                    "  shard {} pos {} -> doc {} @ {}",
+                    hit.shard_id, hit.shard_pos, hit.doc_id, hit.doc_offset
+                );
             }
         }
         Err(e) => println!("Error: {}", e),
@@ -220,13 +257,24 @@ fn format_bytes(n: u64) -> String {
 }
 
 fn run_doc(args: DocArgs) {
-    let engine = IndexReader::open(&args.index).expect("Failed to open index");
-    match engine.get_document(args.doc_id) {
-        Ok(bytes) => {
-            let mut out = std::io::stdout();
-            out.write_all(&bytes).expect("Failed to write output");
+    if args.index.is_dir() {
+        let router = MultiShardReader::open(&args.index).expect("Failed to open shard directory");
+        match router.get_document(args.doc_id as u64) {
+            Ok(bytes) => {
+                let mut out = std::io::stdout();
+                out.write_all(&bytes).expect("Failed to write output");
+            }
+            Err(e) => println!("Error: {}", e),
         }
-        Err(e) => println!("Error: {}", e),
+    } else {
+        let engine = IndexReader::open(&args.index).expect("Failed to open index");
+        match engine.get_document(args.doc_id) {
+            Ok(bytes) => {
+                let mut out = std::io::stdout();
+                out.write_all(&bytes).expect("Failed to write output");
+            }
+            Err(e) => println!("Error: {}", e),
+        }
     }
 }
 

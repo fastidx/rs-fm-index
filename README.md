@@ -91,6 +91,12 @@ And a summary report:
 
 - `ingest_report.json`
 
+Query across shards (pass the shard directory):
+
+```
+cargo run --release -- query ./shards "search"
+```
+
 ---
 
 ## Library Usage
@@ -198,7 +204,7 @@ See `docs/USAGE.md` for deeper examples and edge cases.
 
 - Inputs containing `0` byte are rejected.
 - No compression for SA/ISA yet.
-- No multi-shard orchestration.
+- Multi-shard routing is basic and query-first; no global ranking or caching yet.
 
 ---
 

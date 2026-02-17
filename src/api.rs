@@ -138,6 +138,28 @@ impl IndexReader {
         Self::open_with_cache(path, 128 * 1024 * 1024, 8)
     }
 
+    /// Open an index using a shared cache.
+    pub fn open_with_shared_cache<P: AsRef<Path>>(
+        path: P,
+        cache: Arc<GlobalPageCache>,
+    ) -> io::Result<Self> {
+        let path_ref = path.as_ref();
+        let index_bytes = std::fs::metadata(path_ref)?.len();
+        let mut file = std::fs::File::open(path_ref)?;
+        let header: ShardHeader =
+            bincode::serde::decode_from_std_read(&mut file, bincode::config::legacy())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        let file_id = file_id_for_path(path_ref);
+        let reader = PagedReader::new(path_ref, file_id, cache)?;
+        let engine = QueryEngine::new(header.clone(), reader);
+        Ok(Self {
+            header,
+            engine,
+            index_bytes,
+        })
+    }
+
     /// Open an index with a custom cache size and shard count.
     pub fn open_with_cache<P: AsRef<Path>>(
         path: P,
@@ -153,9 +175,7 @@ impl IndexReader {
 
         let cache = Arc::new(GlobalPageCache::new(cache_bytes, cache_shards));
 
-        let mut hasher = DefaultHasher::new();
-        path_ref.to_string_lossy().hash(&mut hasher);
-        let file_id = hasher.finish();
+        let file_id = file_id_for_path(path_ref);
 
         let reader = PagedReader::new(path_ref, file_id, cache)?;
         let engine = QueryEngine::new(header.clone(), reader);
@@ -254,6 +274,12 @@ impl IndexReader {
             doc_offsets_l_bits_bytes: self.header.doc_offsets_l_bits.len() as u64,
         })
     }
+}
+
+fn file_id_for_path(path: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    hasher.finish()
 }
 
 fn validate_doc_offsets(text_len: usize, offsets: &[u64]) -> io::Result<()> {
