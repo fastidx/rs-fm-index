@@ -129,6 +129,8 @@ impl ShardBuilder {
         let mut isa_bits: u8 = 0;
         let mut sa_packed: Option<Vec<u32>> = None;
         let mut isa_packed: Option<Vec<u32>> = None;
+        let mut sa_packed_u64: Option<Vec<u64>> = None;
+        let mut isa_packed_u64: Option<Vec<u64>> = None;
 
         if sa_len > 0 && can_pack_u32 {
             let mut samples = Vec::with_capacity(sa_len);
@@ -164,6 +166,48 @@ impl ShardBuilder {
             isa_packed = Some(packed);
         }
 
+        if sa_len > 0 && !can_pack_u32 {
+            let mut samples = Vec::with_capacity(sa_len);
+            for (i, &sa_val) in sa_u64.iter().enumerate() {
+                if i % (self.sample_rate as usize) == 0 {
+                    samples.push(sa_val);
+                }
+            }
+
+            let w = bitpack::required_bits_u64(&samples);
+            if w < 64 {
+                let words = (samples.len() * w).div_ceil(64);
+                let mut packed = vec![0u64; words.max(1)];
+                let (packed_w, written) = bitpack::pack_u64_dynamic(&samples, &mut packed);
+                packed.truncate(written);
+                sa_bits = packed_w as u8;
+                sa_packed_u64 = Some(packed);
+            } else {
+                sa_bits = 0;
+            }
+        }
+
+        if isa_len > 0 && !can_pack_u32 {
+            let mut samples = Vec::with_capacity(isa_len);
+            for (i, &isa_val) in isa_u64.iter().enumerate() {
+                if i % (self.sample_rate as usize) == 0 {
+                    samples.push(isa_val);
+                }
+            }
+
+            let w = bitpack::required_bits_u64(&samples);
+            if w < 64 {
+                let words = (samples.len() * w).div_ceil(64);
+                let mut packed = vec![0u64; words.max(1)];
+                let (packed_w, written) = bitpack::pack_u64_dynamic(&samples, &mut packed);
+                packed.truncate(written);
+                isa_bits = packed_w as u8;
+                isa_packed_u64 = Some(packed);
+            } else {
+                isa_bits = 0;
+            }
+        }
+
         // Prepare Header (with placeholder offsets)
         let mut header = ShardHeader::new(
             len as u64,
@@ -185,19 +229,29 @@ impl ShardBuilder {
         // Compute offsets for SA/ISA
         let sa_bytes_len = if sa_bits == 0 {
             sa_len as u64 * 8
-        } else {
+        } else if sa_bits <= 32 {
             sa_packed
                 .as_ref()
                 .map(|v| v.len() as u64 * 4)
+                .unwrap_or(0)
+        } else {
+            sa_packed_u64
+                .as_ref()
+                .map(|v| v.len() as u64 * 8)
                 .unwrap_or(0)
         };
 
         let _isa_bytes_len = if isa_bits == 0 {
             isa_len as u64 * 8
-        } else {
+        } else if isa_bits <= 32 {
             isa_packed
                 .as_ref()
                 .map(|v| v.len() as u64 * 4)
+                .unwrap_or(0)
+        } else {
+            isa_packed_u64
+                .as_ref()
+                .map(|v| v.len() as u64 * 8)
                 .unwrap_or(0)
         };
 
@@ -228,10 +282,18 @@ impl ShardBuilder {
                     writer.write_all(&int_buffer)?;
                 }
             }
-        } else if let Some(packed) = sa_packed.as_ref() {
-            let mut buf = [0u8; 4];
+        } else if sa_bits <= 32 {
+            if let Some(packed) = sa_packed.as_ref() {
+                let mut buf = [0u8; 4];
+                for &word in packed {
+                    LittleEndian::write_u32(&mut buf, word);
+                    writer.write_all(&buf)?;
+                }
+            }
+        } else if let Some(packed) = sa_packed_u64.as_ref() {
+            let mut buf = [0u8; 8];
             for &word in packed {
-                LittleEndian::write_u32(&mut buf, word);
+                LittleEndian::write_u64(&mut buf, word);
                 writer.write_all(&buf)?;
             }
         }
@@ -245,10 +307,18 @@ impl ShardBuilder {
                     writer.write_all(&int_buffer)?;
                 }
             }
-        } else if let Some(packed) = isa_packed.as_ref() {
-            let mut buf = [0u8; 4];
+        } else if isa_bits <= 32 {
+            if let Some(packed) = isa_packed.as_ref() {
+                let mut buf = [0u8; 4];
+                for &word in packed {
+                    LittleEndian::write_u32(&mut buf, word);
+                    writer.write_all(&buf)?;
+                }
+            }
+        } else if let Some(packed) = isa_packed_u64.as_ref() {
+            let mut buf = [0u8; 8];
             for &word in packed {
-                LittleEndian::write_u32(&mut buf, word);
+                LittleEndian::write_u64(&mut buf, word);
                 writer.write_all(&buf)?;
             }
         }

@@ -20,8 +20,12 @@ impl PagedSampledSA {
     pub fn new(reader: PagedReader, len: usize, start_offset: u64, bits: u8) -> Self {
         let byte_len = if bits == 0 {
             len as u64 * 8
+        } else if bits <= 32 {
+            let words = ((len as u64 * bits as u64) + 31) / 32;
+            words * 4
         } else {
-            ((len as u64 * bits as u64) + 7) / 8
+            let words = ((len as u64 * bits as u64) + 63) / 64;
+            words * 8
         };
         Self {
             reader,
@@ -61,13 +65,6 @@ impl PagedSampledSA {
             // 3. Deserialize
             Ok(LittleEndian::read_u64(&bytes))
         } else {
-            if self.bits > 32 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "packed width > 32 not supported",
-                ));
-            }
-
             let bit_offset = i as u64 * self.bits as u64;
             let byte_offset = bit_offset / 8;
             let bit_in_byte = (bit_offset % 8) as u32;
@@ -84,17 +81,27 @@ impl PagedSampledSA {
                 .reader
                 .read_at(self.start_offset + byte_offset, bytes_needed)?;
 
-            let mut buf = [0u8; 8];
-            buf[..bytes.len()].copy_from_slice(&bytes);
-            let raw = u64::from_le_bytes(buf);
-
-            let mask = if self.bits == 64 {
-                u64::MAX
+            if self.bits <= 32 {
+                let mut buf = [0u8; 8];
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                let raw = u64::from_le_bytes(buf);
+                let mask = if self.bits == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << self.bits) - 1
+                };
+                Ok((raw >> bit_in_byte) & mask)
             } else {
-                (1u64 << self.bits) - 1
-            };
-
-            Ok((raw >> bit_in_byte) & mask)
+                let mut buf = [0u8; 16];
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                let raw = u128::from_le_bytes(buf);
+                let mask = if self.bits == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << self.bits) - 1
+                };
+                Ok(((raw >> bit_in_byte) & mask) as u64)
+            }
         }
     }
 
@@ -309,5 +316,33 @@ mod tests {
         assert_eq!(sa.get(128).unwrap(), values[128] as u64);
         assert_eq!(sa.get(1023).unwrap(), values[1023] as u64);
         assert_eq!(sa.get(count - 1).unwrap(), values[count - 1] as u64);
+    }
+
+    #[test]
+    fn test_sa_packed_u64_access() {
+        let count = 1024;
+        let base = u32::MAX as u64 + 1000;
+        let values: Vec<u64> = (0..count).map(|i| base + (i as u64 * 17)).collect();
+        let w = bitpack::required_bits_u64(&values);
+        let words = (values.len() * w).div_ceil(64);
+        let mut packed = vec![0u64; words.max(1)];
+        let (packed_w, written) = bitpack::pack_u64_dynamic(&values, &mut packed);
+        packed.truncate(written);
+
+        let mut file = NamedTempFile::new().unwrap();
+        for word in &packed {
+            file.write_all(&word.to_le_bytes()).unwrap();
+        }
+        file.as_file().sync_all().unwrap();
+
+        let cache = Arc::new(GlobalPageCache::new(1024 * 1024, 1));
+        let reader = PagedReader::new(file.path(), 4243, cache).unwrap();
+        let sa = PagedSampledSA::new(reader, values.len(), 0, packed_w as u8);
+
+        assert_eq!(sa.get(0).unwrap(), values[0]);
+        assert_eq!(sa.get(1).unwrap(), values[1]);
+        assert_eq!(sa.get(127).unwrap(), values[127]);
+        assert_eq!(sa.get(512).unwrap(), values[512]);
+        assert_eq!(sa.get(count - 1).unwrap(), values[count - 1]);
     }
 }

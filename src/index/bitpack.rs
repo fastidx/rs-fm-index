@@ -177,6 +177,140 @@ pub fn unpack_u32_scalar<const W: usize>(input: &[u32], n: usize, out: &mut [u32
     }
 }
 
+/* ===========================================================
+   u64 Bitpacking
+=========================================================== */
+
+/// Calculates the number of bits required to store the largest value in the input.
+#[inline]
+pub fn required_bits_u64(input: &[u64]) -> usize {
+    let mut max = 0u64;
+    for &v in input {
+        max |= v;
+    }
+
+    if max == 0 {
+        1
+    } else {
+        64 - max.leading_zeros() as usize
+    }
+}
+
+/// A macro to generate the 64-arm match statement for dynamic dispatch.
+macro_rules! dispatch_w {
+    ($w:expr, $func:ident, $($args:expr),*) => {
+        match $w {
+             1 => $func::< 1>($($args),*),  2 => $func::< 2>($($args),*),
+             3 => $func::< 3>($($args),*),  4 => $func::< 4>($($args),*),
+             5 => $func::< 5>($($args),*),  6 => $func::< 6>($($args),*),
+             7 => $func::< 7>($($args),*),  8 => $func::< 8>($($args),*),
+             9 => $func::< 9>($($args),*), 10 => $func::<10>($($args),*),
+            11 => $func::<11>($($args),*), 12 => $func::<12>($($args),*),
+            13 => $func::<13>($($args),*), 14 => $func::<14>($($args),*),
+            15 => $func::<15>($($args),*), 16 => $func::<16>($($args),*),
+            17 => $func::<17>($($args),*), 18 => $func::<18>($($args),*),
+            19 => $func::<19>($($args),*), 20 => $func::<20>($($args),*),
+            21 => $func::<21>($($args),*), 22 => $func::<22>($($args),*),
+            23 => $func::<23>($($args),*), 24 => $func::<24>($($args),*),
+            25 => $func::<25>($($args),*), 26 => $func::<26>($($args),*),
+            27 => $func::<27>($($args),*), 28 => $func::<28>($($args),*),
+            29 => $func::<29>($($args),*), 30 => $func::<30>($($args),*),
+            31 => $func::<31>($($args),*), 32 => $func::<32>($($args),*),
+            33 => $func::<33>($($args),*), 34 => $func::<34>($($args),*),
+            35 => $func::<35>($($args),*), 36 => $func::<36>($($args),*),
+            37 => $func::<37>($($args),*), 38 => $func::<38>($($args),*),
+            39 => $func::<39>($($args),*), 40 => $func::<40>($($args),*),
+            41 => $func::<41>($($args),*), 42 => $func::<42>($($args),*),
+            43 => $func::<43>($($args),*), 44 => $func::<44>($($args),*),
+            45 => $func::<45>($($args),*), 46 => $func::<46>($($args),*),
+            47 => $func::<47>($($args),*), 48 => $func::<48>($($args),*),
+            49 => $func::<49>($($args),*), 50 => $func::<50>($($args),*),
+            51 => $func::<51>($($args),*), 52 => $func::<52>($($args),*),
+            53 => $func::<53>($($args),*), 54 => $func::<54>($($args),*),
+            55 => $func::<55>($($args),*), 56 => $func::<56>($($args),*),
+            57 => $func::<57>($($args),*), 58 => $func::<58>($($args),*),
+            59 => $func::<59>($($args),*), 60 => $func::<60>($($args),*),
+            61 => $func::<61>($($args),*), 62 => $func::<62>($($args),*),
+            63 => $func::<63>($($args),*), 64 => $func::<64>($($args),*),
+            _ => unreachable!(),
+        }
+    };
+}
+
+pub fn pack_u64_dynamic(input: &[u64], out: &mut [u64]) -> (usize, usize) {
+    let w = required_bits_u64(input);
+    let words = dispatch_w!(w, pack_u64_scalar, input, out);
+    (w, words)
+}
+
+pub fn unpack_u64_dynamic(packed: &[u64], n: usize, w: usize, out: &mut [u64]) {
+    dispatch_w!(w, unpack_u64_scalar, packed, n, out);
+}
+
+/// Packs `input.len()` u64 values into a linear bitstream.
+/// Each value uses exactly `W` bits.
+pub fn pack_u64_scalar<const W: usize>(input: &[u64], out: &mut [u64]) -> usize {
+    assert!(W > 0 && W <= 64);
+
+    // Mask for the input values
+    let mask: u128 = if W == 64 { u64::MAX as u128 } else { (1u128 << W) - 1 };
+
+    let mut bitbuf: u128 = 0;
+    let mut bits: usize = 0;
+    let mut out_idx: usize = 0;
+
+    for &v in input {
+        // Accumulate bits into u128 buffer
+        bitbuf |= ((v as u128) & mask) << bits;
+        bits += W;
+
+        // Flush full 64-bit words
+        if bits >= 64 {
+            out[out_idx] = bitbuf as u64;
+            out_idx += 1;
+
+            bitbuf >>= 64;
+            bits -= 64;
+        }
+    }
+
+    // Flush remaining bits
+    if bits > 0 {
+        out[out_idx] = bitbuf as u64;
+        out_idx += 1;
+    }
+
+    out_idx
+}
+
+/// Unpacks `n` u64 values from a linear bitstream.
+pub fn unpack_u64_scalar<const W: usize>(input: &[u64], n: usize, out: &mut [u64]) {
+    assert!(W > 0 && W <= 64);
+    assert!(out.len() >= n);
+
+    let mask: u128 = if W == 64 { u64::MAX as u128 } else { (1u128 << W) - 1 };
+
+    let mut bitbuf: u128 = 0;
+    let mut bits: usize = 0;
+    let mut in_idx: usize = 0;
+
+    for out_item in out.iter_mut().take(n) {
+        // Refill buffer until we have at least W bits
+        while bits < W {
+            bitbuf |= (input[in_idx] as u128) << bits;
+            bits += 64;
+            in_idx += 1;
+        }
+
+        // Extract value
+        *out_item = (bitbuf & mask) as u64;
+
+        // Consume bits
+        bitbuf >>= W;
+        bits -= W;
+    }
+}
+
 /* -----------------------------------------------------------
    Helper utilities (used by tests)
 ----------------------------------------------------------- */
@@ -186,6 +320,14 @@ fn packed_len(n: usize, w: usize) -> usize {
         0
     } else {
         (n * w).div_ceil(32)
+    }
+}
+
+fn packed_len_u64(n: usize, w: usize) -> usize {
+    if n == 0 {
+        0
+    } else {
+        (n * w).div_ceil(64)
     }
 }
 
@@ -293,6 +435,77 @@ mod tests {
 
             let expected = packed_len(n, w);
             assert_eq!(words, expected, "n={n}, w={w}");
+        }
+    }
+
+    #[test]
+    fn roundtrip_u64_all_widths() {
+        for n in 0..=64 {
+            for pattern in 0..3 {
+                let input: Vec<u64> = (0..n)
+                    .map(|i| match pattern {
+                        0 => i as u64,
+                        1 => (i * 3) as u64,
+                        _ => (i * 7919) as u64,
+                    })
+                    .collect();
+
+                let mut packed = vec![0u64; packed_len_u64(n, 64).max(1)];
+                let (w, words) = pack_u64_dynamic(&input, &mut packed);
+                packed.truncate(words);
+
+                let mut output = vec![0u64; n];
+                unpack_u64_dynamic(&packed, n, w, &mut output);
+
+                assert_eq!(input, output, "n={n}, pattern={pattern}, w={w}");
+            }
+        }
+    }
+
+    #[test]
+    fn u64_boundary_values() {
+        for &value in &[0u64, u64::MAX] {
+            for n in [0, 1, 2, 7, 32, 100] {
+                let input = vec![value; n];
+                let mut packed = vec![0u64; packed_len_u64(n, 64).max(1)];
+
+                let (w, words) = pack_u64_dynamic(&input, &mut packed);
+                packed.truncate(words);
+
+                let mut output = vec![0u64; n];
+                unpack_u64_dynamic(&packed, n, w, &mut output);
+
+                assert_eq!(input, output, "value={value}, n={n}, w={w}");
+            }
+        }
+    }
+
+    #[test]
+    fn u64_randomized_fuzz() {
+        let mut seed: u64 = 0xFEED_FACE_CAFE_BEEF;
+
+        fn next_u64(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        for _ in 0..300 {
+            let n = (next_u64(&mut seed) % 500) as usize;
+            let mut input = vec![0u64; n];
+            for v in &mut input {
+                *v = next_u64(&mut seed);
+            }
+
+            let mut packed = vec![0u64; packed_len_u64(n, 64).max(1)];
+            let (w, words) = pack_u64_dynamic(&input, &mut packed);
+            packed.truncate(words);
+
+            let mut output = vec![0u64; n];
+            unpack_u64_dynamic(&packed, n, w, &mut output);
+
+            assert_eq!(input, output, "fuzz n={n}, w={w}");
         }
     }
 }

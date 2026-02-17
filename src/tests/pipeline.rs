@@ -113,11 +113,28 @@ fn test_builder_offsets_and_lengths() {
     let file_len = std::fs::metadata(tmp_file.path()).unwrap().len();
     let sa_bits = if header.sa_bits == 0 { 64 } else { header.sa_bits as u64 };
     let isa_bits = if header.isa_bits == 0 { 64 } else { header.isa_bits as u64 };
-    let sa_words = ((sample_count(text.len(), sample_rate) as u64 * sa_bits) + 31) / 32;
+    let sa_word_bits = if header.sa_bits == 0 {
+        64
+    } else if header.sa_bits <= 32 {
+        32
+    } else {
+        64
+    } as u64;
+    let isa_word_bits = if header.isa_bits == 0 {
+        64
+    } else if header.isa_bits <= 32 {
+        32
+    } else {
+        64
+    } as u64;
+    let sa_words =
+        ((sample_count(text.len(), sample_rate) as u64 * sa_bits) + sa_word_bits - 1)
+            / sa_word_bits;
     let isa_words =
-        ((sample_count(text.len(), header.isa_sample_rate) as u64 * isa_bits) + 31) / 32;
-    let expected_sa_bytes = sa_words * 4;
-    let expected_isa_bytes = isa_words * 4;
+        ((sample_count(text.len(), header.isa_sample_rate) as u64 * isa_bits) + isa_word_bits - 1)
+            / isa_word_bits;
+    let expected_sa_bytes = sa_words * (sa_word_bits / 8);
+    let expected_isa_bytes = isa_words * (isa_word_bits / 8);
     assert_eq!(header.isa_start_offset, header.sa_start_offset + expected_sa_bytes);
     assert_eq!(header.isa_start_offset + expected_isa_bytes, file_len);
 }
