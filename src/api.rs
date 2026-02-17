@@ -113,7 +113,7 @@ pub struct IndexReader {
     index_bytes: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexStats {
     pub text_bytes: u64,
     pub index_bytes: u64,
