@@ -61,17 +61,17 @@ fn test_header_roundtrip() {
     ];
 
     let doc_offsets = vec![0u64, 5, 10, 20, 21];
-    let mut header = ShardHeader::new(
-        101,
-        4,
-        4,
-        0,
-        0,
+    let mut header = ShardHeader::new(crate::index::header::ShardHeaderParams {
+        text_len: 101,
+        sa_sample_rate: 4,
+        isa_sample_rate: 4,
+        sa_bits: 0,
+        isa_bits: 0,
         c_table,
         codes,
-        tree_shape.clone(),
-        doc_offsets.clone(),
-    );
+        tree_shape: tree_shape.clone(),
+        doc_offsets: doc_offsets.clone(),
+    });
     header.wt_start_offset = 777;
     header.sa_start_offset = 888;
 
@@ -249,4 +249,137 @@ fn test_full_ingestion_pipeline() {
 
     let rank_m = wt.rank(b'm', 12).unwrap();
     assert_eq!(rank_m, 1);
+}
+
+#[test]
+fn test_orchestrator_chunking() {
+    use crate::ingest::orchestrator::{IngestConfig, Orchestrator};
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let input_dir = TempDir::new().unwrap();
+    for i in 0..3 {
+        let p = input_dir.path().join(format!("doc{}.txt", i));
+        let mut f = std::fs::File::create(p).unwrap();
+        let content = vec![b'a' + i as u8; 100];
+        f.write_all(&content).unwrap();
+    }
+
+    let output_dir = TempDir::new().unwrap();
+
+    let config = IngestConfig {
+        input_patterns: vec![input_dir.path().join("*.txt").to_string_lossy().to_string()],
+        output_dir: output_dir.path().to_path_buf(),
+        chunk_size: 150,
+        read_buffer: 64,
+        num_workers: 2,
+        sample_rate: 4,
+    };
+
+    let orch = Orchestrator::new(config);
+    orch.run().expect("Orchestrator failed");
+
+    let pattern = output_dir
+        .path()
+        .join("shard_*.idx")
+        .to_string_lossy()
+        .to_string();
+    let shards: Vec<_> = glob::glob(&pattern).unwrap().map(|x| x.unwrap()).collect();
+
+    assert!(shards.len() >= 2, "Expected multiple shards, got {}", shards.len());
+
+    let stats_pattern = output_dir
+        .path()
+        .join("shard_*.stats.json")
+        .to_string_lossy()
+        .to_string();
+    let stats_files: Vec<_> = glob::glob(&stats_pattern)
+        .unwrap()
+        .map(|x| x.unwrap())
+        .collect();
+    assert_eq!(stats_files.len(), shards.len());
+
+    let report_path = output_dir.path().join("ingest_report.json");
+    assert!(report_path.exists());
+}
+
+#[test]
+fn test_orchestrator_oversized_split_metadata() {
+    use crate::ingest::orchestrator::{IngestConfig, Orchestrator, ShardMeta};
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let input_dir = TempDir::new().unwrap();
+    let p = input_dir.path().join("big.txt");
+    let mut f = std::fs::File::create(&p).unwrap();
+    let content = vec![b'x'; 400];
+    f.write_all(&content).unwrap();
+
+    let output_dir = TempDir::new().unwrap();
+    let config = IngestConfig {
+        input_patterns: vec![input_dir.path().join("*.txt").to_string_lossy().to_string()],
+        output_dir: output_dir.path().to_path_buf(),
+        chunk_size: 150,
+        read_buffer: 64,
+        num_workers: 2,
+        sample_rate: 4,
+    };
+
+    let orch = Orchestrator::new(config);
+    orch.run().expect("Orchestrator failed");
+
+    let meta_paths: Vec<_> = glob::glob(
+        &output_dir
+            .path()
+            .join("shard_*.meta.json")
+            .to_string_lossy()
+            .to_string(),
+    )
+    .unwrap()
+    .map(|x| x.unwrap())
+    .collect();
+
+    assert!(meta_paths.len() >= 2, "Expected multiple meta files");
+
+    let mut all_segments = Vec::new();
+    for mp in meta_paths {
+        let data = std::fs::read_to_string(mp).unwrap();
+        let meta: ShardMeta = serde_json::from_str(&data).unwrap();
+        all_segments.extend(meta.segments);
+    }
+
+    all_segments.sort_by_key(|s| s.part_index);
+    assert!(all_segments.len() >= 2);
+    let first = &all_segments[0];
+    let last = &all_segments[all_segments.len() - 1];
+    assert!(first.is_first);
+    assert!(!first.is_last);
+    assert!(last.is_last);
+    assert_eq!(first.doc_id, last.doc_id);
+    assert_eq!(first.part_index, 0);
+}
+
+#[test]
+fn test_ingest_config_parse() {
+    use crate::ingest::config::{size_value_to_usize, IngestConfigFile};
+    use tempfile::Builder;
+
+    let toml = r#"
+input_patterns = ["data/*.txt"]
+output_dir = "out"
+chunk_size = "64MiB"
+read_buffer = 1048576
+num_workers = 8
+sample_rate = 64
+"#;
+    let mut file = Builder::new().suffix(".toml").tempfile().unwrap();
+    std::io::Write::write_all(&mut file, toml.as_bytes()).unwrap();
+    let cfg = IngestConfigFile::load(file.path()).unwrap();
+
+    assert_eq!(cfg.input_patterns.unwrap()[0], "data/*.txt");
+    assert_eq!(cfg.output_dir.unwrap().to_string_lossy(), "out");
+    assert_eq!(size_value_to_usize(cfg.chunk_size.as_ref().unwrap()).unwrap(), 64 * 1024 * 1024);
+    assert_eq!(size_value_to_usize(cfg.read_buffer.as_ref().unwrap()).unwrap(), 1_048_576);
+    assert_eq!(cfg.num_workers.unwrap(), 8);
+    assert_eq!(cfg.sample_rate.unwrap(), 64);
 }

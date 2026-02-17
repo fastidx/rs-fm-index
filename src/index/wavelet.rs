@@ -227,8 +227,8 @@ impl WaveletTreeBuilder {
 
         let mut nodes = vec![BuilderNode::Internal { left: 0, right: 0 }];
 
-        for sym in 0..=255 {
-            if let Some(code) = codes[sym] {
+        for (sym, code) in codes.iter().enumerate() {
+            if let Some(code) = code {
                 let mut curr_idx = 0;
                 // MSB first for traversal
                 for depth in (0..code.len).rev() {

@@ -5,7 +5,7 @@ use std::io::{self, Cursor, Write};
 use std::path::Path;
 
 use crate::index::bitpack;
-use crate::index::header::ShardHeader;
+use crate::index::header::{ShardHeader, ShardHeaderParams};
 use crate::index::wavelet::WaveletTreeBuilder;
 
 pub struct ShardBuilder {
@@ -120,8 +120,8 @@ impl ShardBuilder {
         let wt_bytes = wt_buf.into_inner();
 
         // Compute sample lengths
-        let sa_len = (len + self.sample_rate as usize - 1) / self.sample_rate as usize;
-        let isa_len = (len + self.sample_rate as usize - 1) / self.sample_rate as usize;
+        let sa_len = len.div_ceil(self.sample_rate as usize);
+        let isa_len = len.div_ceil(self.sample_rate as usize);
 
         let can_pack_u32 = len <= u32::MAX as usize;
 
@@ -209,17 +209,17 @@ impl ShardBuilder {
         }
 
         // Prepare Header (with placeholder offsets)
-        let mut header = ShardHeader::new(
-            len as u64,
-            self.sample_rate,
-            self.sample_rate, // Use same rate for ISA
+        let mut header = ShardHeader::new(ShardHeaderParams {
+            text_len: len as u64,
+            sa_sample_rate: self.sample_rate,
+            isa_sample_rate: self.sample_rate, // Use same rate for ISA
             sa_bits,
             isa_bits,
             c_table,
             codes,
-            tree_shape.clone(),
+            tree_shape: tree_shape.clone(),
             doc_offsets,
-        );
+        });
 
         let config = bincode::config::legacy();
         let header_bytes = bincode::serde::encode_to_vec(&header, config)

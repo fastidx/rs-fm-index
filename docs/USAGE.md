@@ -48,6 +48,36 @@ Build a multi-doc index:
 cargo run --release -- build-multi ./index.idx ./doc1.txt ./doc2.txt ./doc3.txt
 ```
 
+### Distributed Ingestion (Sharded)
+
+```
+cargo run --release -- ingest --input "data/**/*.txt" --output ./shards --chunk-size 1GiB --workers 8
+```
+
+### Distributed Ingestion with Config
+
+`ingest.toml`:
+
+```toml
+input_patterns = ["data/**/*.txt"]
+output_dir = "shards"
+chunk_size = "1GiB"
+read_buffer = "8MiB"
+num_workers = 8
+sample_rate = 32
+```
+
+Run:
+
+```
+cargo run --release -- ingest --config ingest.toml
+```
+
+Outputs:
+- `shard_00000.meta.json` (continuation metadata)
+- `shard_00000.stats.json` (per-shard stats)
+- `ingest_report.json` (overall ingest report)
+
 Query and map to document:
 
 ```
@@ -56,10 +86,22 @@ cargo run --release -- query ./index.idx "search"
 
 The CLI prints the first few positions and their `(doc_id, offset)` pairs.
 
+Query a shard directory:
+
+```
+cargo run --release -- query ./shards "search"
+```
+
 Extract a full document:
 
 ```
 cargo run --release -- doc ./index.idx 2 > doc3.txt
+```
+
+Extract a full document from shards:
+
+```
+cargo run --release -- doc ./shards 2 > doc3.txt
 ```
 
 ---

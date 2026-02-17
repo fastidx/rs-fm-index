@@ -85,18 +85,32 @@ pub struct ShardHeader {
     pub doc_offsets_l_bits: Vec<u8>,
 }
 
+pub struct ShardHeaderParams {
+    pub text_len: u64,
+    pub sa_sample_rate: u32,
+    pub isa_sample_rate: u32,
+    pub sa_bits: u8,
+    pub isa_bits: u8,
+    pub c_table: [u64; 256],
+    pub codes: [Option<HuffmanCode>; 256],
+    pub tree_shape: Vec<WaveletNodeShape>,
+    pub doc_offsets: Vec<u64>,
+}
+
 impl ShardHeader {
-    pub fn new(
-        text_len: u64,
-        sa_sample_rate: u32,
-        isa_sample_rate: u32,
-        sa_bits: u8,
-        isa_bits: u8,
-        c_table: [u64; 256],
-        codes: [Option<HuffmanCode>; 256],
-        tree_shape: Vec<WaveletNodeShape>,
-        doc_offsets: Vec<u64>,
-    ) -> Self {
+    pub fn new(params: ShardHeaderParams) -> Self {
+        let ShardHeaderParams {
+            text_len,
+            sa_sample_rate,
+            isa_sample_rate,
+            sa_bits,
+            isa_bits,
+            c_table,
+            codes,
+            tree_shape,
+            doc_offsets,
+        } = params;
+
         let doc_offsets_count = doc_offsets.len() as u32;
         let (doc_offsets_l, doc_offsets_u_bits_len, doc_offsets_u_bits, doc_offsets_l_bits) =
             encode_doc_offsets_ef(&doc_offsets).unwrap_or((0, 0, Vec::new(), Vec::new()));
@@ -251,7 +265,7 @@ fn encode_doc_offsets_ef(offsets: &[u64]) -> io::Result<(u8, u64, Vec<u8>, Vec<u
 
     let high_last = *highs.last().unwrap_or(&0);
     let u_bits_len = high_last + n;
-    let u_bytes_len = ((u_bits_len + 7) / 8) as usize;
+    let u_bytes_len = u_bits_len.div_ceil(8) as usize;
     let mut u_bits = vec![0u8; u_bytes_len];
     for (i, &h) in highs.iter().enumerate() {
         let pos = h + i as u64;

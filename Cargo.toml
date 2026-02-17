@@ -6,12 +6,18 @@ edition = "2024"
 [dependencies]
 cdivsufsort = "2.0.0"                               # Fast C-based Suffix Array construction
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 bincode = { version = "2.0", features = ["serde"] }
 rayon = "1.8"
 anyhow = "1.0"                                      # For error handling
 twox-hash = "2.1.2"
 tempfile = "3.25.0"
 byteorder = "1.0"
+clap = { version = "4.5.4", features = ["derive"] }
+glob = "0.3"
+crossbeam-channel = "0.5"
+indicatif = "0.17"
+toml = "0.9.8"
 
 [dev-dependencies]
 rand = "0.10.0"
