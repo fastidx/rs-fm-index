@@ -171,10 +171,11 @@ fn test_sampled_sa_matches_reference() {
 fn test_wavelet_rank_matches_naive_random() {
     let mut rng = StdRng::seed_from_u64(12345);
     let len = 1000;
-    let mut text = Vec::with_capacity(len);
+    let mut text = Vec::with_capacity(len + 1);
     for _ in 0..len {
-        text.push(rng.random_range(0..=15));
+        text.push(rng.random_range(1..=15));
     }
+    text.push(0);
 
     let sample_rate = 5;
     let builder = ShardBuilder::new(sample_rate);
@@ -195,7 +196,7 @@ fn test_wavelet_rank_matches_naive_random() {
     let bwt = build_bwt(&text);
     for _ in 0..200 {
         let sym = rng.random_range(0..=15);
-        let idx = rng.random_range(0..=len);
+        let idx = rng.random_range(0..=text.len());
         let expected = bwt[..idx].iter().filter(|&&c| c == sym).count();
         let actual = wt.rank(sym, idx).unwrap();
         assert_eq!(actual, expected);

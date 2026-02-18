@@ -38,7 +38,8 @@ impl IndexBuilder {
         builder.build_with_offsets(&data, vec![0], output_path)
     }
 
-    /// Build a multi-document index. Each document is separated by a 0 byte sentinel.
+    /// Build a multi-document index by concatenating documents and appending a single 0 byte
+    /// sentinel at the end. Document boundaries are tracked via doc offsets.
     /// Fails if any input contains a 0 byte.
     pub fn build_multi_documents<P: AsRef<Path>>(
         &self,
@@ -64,8 +65,8 @@ impl IndexBuilder {
             }
             offsets.push(text.len() as u64);
             text.extend_from_slice(doc);
-            text.push(0);
         }
+        text.push(0);
 
         let builder = ShardBuilder::new(self.sample_rate);
         builder.build_with_offsets(&text, offsets, output_path)
@@ -93,7 +94,8 @@ impl IndexBuilder {
     }
 
     /// Build from concatenated text and explicit document offsets.
-    /// The caller is responsible for sentinel placement if needed.
+    /// If the text does not end with a 0 byte sentinel, one is appended.
+    /// The text must not contain any other 0 bytes.
     pub fn build_from_concatenated<P: AsRef<Path>>(
         &self,
         text: &[u8],
@@ -102,7 +104,32 @@ impl IndexBuilder {
     ) -> io::Result<()> {
         validate_doc_offsets(text.len(), doc_offsets)?;
         let builder = ShardBuilder::new(self.sample_rate);
-        builder.build_with_offsets(text, doc_offsets.to_vec(), output_path)
+
+        let text_ref: &[u8];
+        let mut owned: Vec<u8> = Vec::new();
+
+        if text.last() == Some(&0) {
+            if text[..text.len() - 1].contains(&0) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "text contains 0 byte before sentinel; separators are not supported",
+                ));
+            }
+            text_ref = text;
+        } else {
+            if text.contains(&0) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "text contains 0 byte; cannot use 0 as sentinel",
+                ));
+            }
+            owned.reserve(text.len() + 1);
+            owned.extend_from_slice(text);
+            owned.push(0);
+            text_ref = &owned;
+        }
+
+        builder.build_with_offsets(text_ref, doc_offsets.to_vec(), output_path)
     }
 }
 

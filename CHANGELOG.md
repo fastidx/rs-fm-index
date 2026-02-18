@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [Unreleased] - 2026-02-18
 
 ### Added
 
@@ -14,6 +14,7 @@
 - `ShardHeader::new` now uses a params struct to reduce argument count.
 - Minor internal refactors for Clippy hygiene.
 - Builder now streams BWT to disk and samples SA/ISA on the fly (no full BWT/SA/ISA in memory).
+- Enforced a single trailing `0` sentinel with no internal `0` bytes; multi-doc boundaries use doc offsets only.
 
 ## [0.0.1] - 2026-02-17
 

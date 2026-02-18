@@ -1,4 +1,4 @@
-# TODO List - Infini-gram Rust
+# TODO List - FM_INDEX Rust
 
 ## Phase 1: Core I/O & Caching
 

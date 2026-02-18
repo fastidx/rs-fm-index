@@ -220,6 +220,8 @@ impl QueryEngine {
         Ok(c_start + rank)
     }
 
+    
+
     /// Convert a global byte offset to a document id and offset within that doc.
     pub fn pos_to_doc_id(&self, pos: usize) -> Option<(usize, usize)> {
         if pos >= self.text_len {

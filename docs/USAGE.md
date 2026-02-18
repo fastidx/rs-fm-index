@@ -161,7 +161,8 @@ let doc = reader.get_document(0)?;
 
 ## Sentinel Notes
 
-This implementation uses `0` as a sentinel byte.
+This implementation uses `0` as a sentinel byte. Multi-document builds append a single trailing
+sentinel; document boundaries are tracked via doc offsets (no separators between documents).
 
 Inputs **must not contain `0`**. If you need to index binary files or data that may include 0, you must pre-process (escape) those bytes or adopt a different sentinel.
 
