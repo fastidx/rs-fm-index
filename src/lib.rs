@@ -6,6 +6,7 @@ pub mod ingest;
 pub mod shard_router;
 
 pub use api::{IndexBuilder, IndexReader, IndexStats};
+pub use index::encoding::EncodingMode;
 pub use shard_router::{MultiShardReader, ShardHit};
 
 #[cfg(test)]

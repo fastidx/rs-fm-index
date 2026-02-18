@@ -4,7 +4,8 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 fn assert_sa_matches(text: &[u8], mem_limit: usize) {
-    let sa_stream = external_sa::build_sa_external(text, mem_limit).unwrap();
+    let text_u16: Vec<u16> = text.iter().map(|&b| b as u16).collect();
+    let sa_stream = external_sa::build_sa_external(&text_u16, mem_limit).unwrap();
     let sa_ext: Vec<u64> = sa_stream
         .iter()
         .unwrap()
@@ -26,6 +27,12 @@ fn random_text_with_sentinel(seed: u64, len: usize) -> Vec<u8> {
     }
     data.push(0);
     data
+}
+
+fn naive_sa_u16(text: &[u16]) -> Vec<u64> {
+    let mut suffixes: Vec<usize> = (0..text.len()).collect();
+    suffixes.sort_by(|&a, &b| text[a..].cmp(&text[b..]));
+    suffixes.into_iter().map(|v| v as u64).collect()
 }
 
 #[test]
@@ -53,4 +60,14 @@ fn test_external_sa_matches_random() {
         let text = random_text_with_sentinel(1234 + i as u64, len);
         assert_sa_matches(&text, mem_limit);
     }
+}
+
+#[test]
+fn test_external_sa_handles_symbol_256() {
+    let mem_limit = 128;
+    let text: Vec<u16> = vec![1, 256, 2, 256, 3, 0];
+    let sa_stream = external_sa::build_sa_external(&text, mem_limit).unwrap();
+    let sa_ext: Vec<u64> = sa_stream.iter().unwrap().map(|v| v.unwrap()).collect();
+    let sa_ref = naive_sa_u16(&text);
+    assert_eq!(sa_ext, sa_ref);
 }

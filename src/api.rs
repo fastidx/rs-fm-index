@@ -1,4 +1,5 @@
 use crate::index::builder::ShardBuilder;
+use crate::index::encoding::EncodingMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
 use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
@@ -11,36 +12,36 @@ use std::sync::Arc;
 /// High-level builder for creating FM-index shards.
 pub struct IndexBuilder {
     sample_rate: u32,
+    encoding_mode: EncodingMode,
 }
 
 impl IndexBuilder {
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate }
+        Self {
+            sample_rate,
+            encoding_mode: EncodingMode::Text,
+        }
+    }
+
+    pub fn with_encoding_mode(mut self, encoding_mode: EncodingMode) -> Self {
+        self.encoding_mode = encoding_mode;
+        self
     }
 
     /// Build a single-document index. A trailing sentinel (0 byte) is added.
-    /// Fails if the input already contains a 0 byte.
+    /// In text mode, fails if the input already contains a 0 byte.
     pub fn build_single_document<P: AsRef<Path>>(
         &self,
         text: &[u8],
         output_path: P,
     ) -> io::Result<()> {
-        if text.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "input contains 0 byte; cannot use 0 as sentinel",
-            ));
-        }
-        let mut data = Vec::with_capacity(text.len() + 1);
-        data.extend_from_slice(text);
-        data.push(0);
-        let builder = ShardBuilder::new(self.sample_rate);
-        builder.build_with_offsets(&data, vec![0], output_path)
+        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        builder.build_with_offsets(text, vec![0], output_path)
     }
 
     /// Build a multi-document index by concatenating documents and appending a single 0 byte
     /// sentinel at the end. Document boundaries are tracked via doc offsets.
-    /// Fails if any input contains a 0 byte.
+    /// In text mode, fails if any input contains a 0 byte.
     pub fn build_multi_documents<P: AsRef<Path>>(
         &self,
         docs: &[Vec<u8>],
@@ -57,18 +58,11 @@ impl IndexBuilder {
         let mut offsets = Vec::with_capacity(docs.len());
 
         for doc in docs {
-            if doc.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "document contains 0 byte; cannot use 0 as sentinel",
-                ));
-            }
             offsets.push(text.len() as u64);
             text.extend_from_slice(doc);
         }
-        text.push(0);
 
-        let builder = ShardBuilder::new(self.sample_rate);
+        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
         builder.build_with_offsets(&text, offsets, output_path)
     }
 
@@ -94,8 +88,8 @@ impl IndexBuilder {
     }
 
     /// Build from concatenated text and explicit document offsets.
-    /// If the text does not end with a 0 byte sentinel, one is appended.
-    /// The text must not contain any other 0 bytes.
+    /// The text is treated as raw bytes; a sentinel is appended after encoding.
+    /// In text mode, the text must not contain any 0 bytes.
     pub fn build_from_concatenated<P: AsRef<Path>>(
         &self,
         text: &[u8],
@@ -103,33 +97,8 @@ impl IndexBuilder {
         output_path: P,
     ) -> io::Result<()> {
         validate_doc_offsets(text.len(), doc_offsets)?;
-        let builder = ShardBuilder::new(self.sample_rate);
-
-        let text_ref: &[u8];
-        let mut owned: Vec<u8> = Vec::new();
-
-        if text.last() == Some(&0) {
-            if text[..text.len() - 1].contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "text contains 0 byte before sentinel; separators are not supported",
-                ));
-            }
-            text_ref = text;
-        } else {
-            if text.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "text contains 0 byte; cannot use 0 as sentinel",
-                ));
-            }
-            owned.reserve(text.len() + 1);
-            owned.extend_from_slice(text);
-            owned.push(0);
-            text_ref = &owned;
-        }
-
-        builder.build_with_offsets(text_ref, doc_offsets.to_vec(), output_path)
+        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        builder.build_with_offsets(text, doc_offsets.to_vec(), output_path)
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::api::IndexStats;
 use crate::index::builder::ShardBuilder;
+use crate::index::encoding::EncodingMode;
 use crate::IndexReader;
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -18,6 +19,7 @@ pub struct IngestConfig {
     pub read_buffer: usize,
     pub num_workers: usize,
     pub sample_rate: u32,
+    pub encoding_mode: EncodingMode,
 }
 
 struct ShardJob {
@@ -86,9 +88,6 @@ impl Orchestrator {
         if self.config.chunk_size == 0 {
             anyhow::bail!("chunk_size must be > 0");
         }
-        if self.config.chunk_size < 2 {
-            anyhow::bail!("chunk_size must be at least 2 to allow sentinel");
-        }
         if self.config.read_buffer == 0 {
             anyhow::bail!("read_buffer must be > 0");
         }
@@ -142,6 +141,7 @@ impl Orchestrator {
         let mut handles = Vec::new();
         let output_dir = self.config.output_dir.clone();
         let sample_rate = self.config.sample_rate;
+        let encoding_mode = self.config.encoding_mode;
 
         for id in 0..self.config.num_workers {
             let rx = rx.clone();
@@ -162,7 +162,7 @@ impl Orchestrator {
                     pb.set_length(1);
                     pb.set_message(format!("Building shard {} ({} MB)", job.id, size_mb));
 
-                    let builder = ShardBuilder::new(sample_rate);
+                    let builder = ShardBuilder::new_with_mode(sample_rate, encoding_mode);
                     if let Err(e) =
                         builder.build_with_offsets(&job.data, job.doc_offsets.clone(), &shard_path)
                     {
@@ -281,7 +281,13 @@ impl Orchestrator {
                 let take = std::cmp::min(remaining as usize, available) as u64;
                 let segment_start = buffer.len() as u64;
 
-                self.read_into_buffer(&mut file, take, &mut buffer, self.config.read_buffer, &path)?;
+                self.read_into_buffer(
+                    &mut file,
+                    take,
+                    &mut buffer,
+                    self.config.read_buffer,
+                    &path,
+                )?;
 
                 doc_offsets.push(segment_start);
 
@@ -335,10 +341,6 @@ impl Orchestrator {
             return Ok(());
         }
 
-        if *buffer.last().unwrap() != 0 {
-            buffer.push(0);
-        }
-
         let job = ShardJob {
             id: *shard_id,
             data: std::mem::take(buffer),
@@ -381,9 +383,9 @@ impl Orchestrator {
             if n == 0 {
                 break;
             }
-            if temp[..n].contains(&0) {
+            if self.config.encoding_mode == EncodingMode::Text && temp[..n].contains(&0) {
                 anyhow::bail!(
-                    "Input file {:?} contains 0 byte; sentinel conflicts with indexing rules",
+                    "Input file {:?} contains 0 byte; sentinel conflicts with text mode",
                     path
                 );
             }
