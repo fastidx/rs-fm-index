@@ -1,12 +1,13 @@
 use byteorder::{ByteOrder, LittleEndian};
 use cdivsufsort::sort as div_sort; // Using the cdivsufsort crate
 use std::fs::File;
-use std::io::{self, Cursor, Write};
+use std::io::{self, BufWriter, Cursor, Write};
 use std::path::Path;
 
 use crate::index::bitpack;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
-use crate::index::wavelet::WaveletTreeBuilder;
+use crate::index::wavelet::{canonical_codes, huffman_lengths, WaveletTreeBuilder};
+use tempfile::NamedTempFile;
 
 pub struct ShardBuilder {
     sample_rate: u32,
@@ -64,44 +65,68 @@ impl ShardBuilder {
         // cdivsufsort returns Vec<i32>
         let (_, sa_i32) = div_sort(text).into_parts();
 
-        // 2. Build BWT
+        // 2. Build BWT + samples using an external-memory pipeline
         // BWT[i] = Text[SA[i] - 1] (cyclic)
-        // We build this in memory. For 1GB text, this is 1GB BWT.
+        // We stream BWT into a temp file and avoid materializing SA/BWT/ISA in memory.
         let len = text.len();
-        let mut bwt = Vec::with_capacity(len);
-        let mut sa_u64 = Vec::with_capacity(len); // Keep SA for sampling
+        if len == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "text must be non-empty",
+            ));
+        }
 
-        // NEW: ISA Vector
-        // We need the full ISA in memory to sample it, or we can construct it
-        // sparsely if we iterate carefuly. But for 1GB chunks, efficient
-        // random access construction is needed.
-        // ISA[SA[i]] = i.
-        let mut isa_u64 = vec![0u64; len];
+        let sample_rate = self.sample_rate as usize;
+        let sa_len = len.div_ceil(sample_rate);
+        let isa_len = len.div_ceil(sample_rate);
 
-        for (row_idx, &sa_val) in sa_i32.iter().enumerate() {
-            let pos = sa_val as usize; // Cast i32 -> usize
-            sa_u64.push(pos as u64); // Store as u64 for index
+        let mut sa_samples: Vec<u64> = Vec::with_capacity(sa_len);
+        let mut isa_samples: Vec<u64> = vec![0u64; isa_len];
 
-            // Build ISA: Map "Text Position" -> "BWT Row Index"
-            isa_u64[pos] = row_idx as u64;
+        let mut counts = [0u64; 256];
+        let mut bwt_file = NamedTempFile::new()?;
+        {
+            let mut writer = BufWriter::new(bwt_file.as_file_mut());
+            let mut buffer = Vec::with_capacity(8 * 1024 * 1024);
 
-            if pos == 0 {
-                // In BWT, the char "before" the start is the last char
-                // But typically BWT algorithms append a sentinel $.
-                // If we assume the input text HAS a sentinel (0 bytes), we use cyclic logic.
-                // Text[len-1]
-                bwt.push(text[len - 1]);
-            } else {
-                bwt.push(text[pos - 1]);
+            for (row_idx, &sa_val) in sa_i32.iter().enumerate() {
+                let pos = sa_val as usize;
+
+                if row_idx % sample_rate == 0 {
+                    sa_samples.push(pos as u64);
+                }
+                if pos % sample_rate == 0 {
+                    let idx = pos / sample_rate;
+                    if idx < isa_samples.len() {
+                        isa_samples[idx] = row_idx as u64;
+                    }
+                }
+
+                let bwt_byte = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                counts[bwt_byte as usize] += 1;
+                buffer.push(bwt_byte);
+
+                if buffer.len() >= 8 * 1024 * 1024 {
+                    writer.write_all(&buffer)?;
+                    buffer.clear();
+                }
             }
+
+            if !buffer.is_empty() {
+                writer.write_all(&buffer)?;
+            }
+            writer.flush()?;
+        }
+
+        if sa_samples.len() != sa_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SA sample length mismatch",
+            ));
         }
 
         // 3. Compute C-Table
         // C[x] = total count of characters lexicographically smaller than x
-        let mut counts = [0u64; 256];
-        for &b in &bwt {
-            counts[b as usize] += 1;
-        }
         let mut c_table = [0u64; 256];
         let mut sum = 0;
         for i in 0..256 {
@@ -109,19 +134,19 @@ impl ShardBuilder {
             sum += counts[i];
         }
 
-        // 4. Initialize Wavelet Tree Builder
-        let mut wt_builder = WaveletTreeBuilder::new(&bwt);
-        wt_builder.process_text(&bwt);
-        let codes = wt_builder.codes; // Save codes for header
+        // 4. Initialize Wavelet Tree Builder from BWT stream
+        let lens = huffman_lengths(&counts);
+        let codes = canonical_codes(&lens);
+        let mut wt_builder = WaveletTreeBuilder::from_codes(codes);
+
+        let bwt_read = bwt_file.reopen()?;
+        let mut bwt_reader = std::io::BufReader::new(bwt_read);
+        wt_builder.process_reader(&mut bwt_reader)?;
 
         // 5. Write Wavelet Tree to a buffer first so we can size the header correctly
         let mut wt_buf = Cursor::new(Vec::new());
         let (_wt_offset, tree_shape) = wt_builder.write_to_file(&mut wt_buf)?;
         let wt_bytes = wt_buf.into_inner();
-
-        // Compute sample lengths
-        let sa_len = len.div_ceil(self.sample_rate as usize);
-        let isa_len = len.div_ceil(self.sample_rate as usize);
 
         let can_pack_u32 = len <= u32::MAX as usize;
 
@@ -134,10 +159,8 @@ impl ShardBuilder {
 
         if sa_len > 0 && can_pack_u32 {
             let mut samples = Vec::with_capacity(sa_len);
-            for (i, &sa_val) in sa_u64.iter().enumerate() {
-                if i % (self.sample_rate as usize) == 0 {
-                    samples.push(sa_val as u32);
-                }
+            for &sa_val in &sa_samples {
+                samples.push(sa_val as u32);
             }
 
             let w = bitpack::required_bits_u32(&samples) as u8;
@@ -151,10 +174,8 @@ impl ShardBuilder {
 
         if isa_len > 0 && can_pack_u32 {
             let mut samples = Vec::with_capacity(isa_len);
-            for (i, &isa_val) in isa_u64.iter().enumerate() {
-                if i % (self.sample_rate as usize) == 0 {
-                    samples.push(isa_val as u32);
-                }
+            for &isa_val in &isa_samples {
+                samples.push(isa_val as u32);
             }
 
             let w = bitpack::required_bits_u32(&samples) as u8;
@@ -167,18 +188,11 @@ impl ShardBuilder {
         }
 
         if sa_len > 0 && !can_pack_u32 {
-            let mut samples = Vec::with_capacity(sa_len);
-            for (i, &sa_val) in sa_u64.iter().enumerate() {
-                if i % (self.sample_rate as usize) == 0 {
-                    samples.push(sa_val);
-                }
-            }
-
-            let w = bitpack::required_bits_u64(&samples);
+            let w = bitpack::required_bits_u64(&sa_samples);
             if w < 64 {
-                let words = (samples.len() * w).div_ceil(64);
+                let words = (sa_samples.len() * w).div_ceil(64);
                 let mut packed = vec![0u64; words.max(1)];
-                let (packed_w, written) = bitpack::pack_u64_dynamic(&samples, &mut packed);
+                let (packed_w, written) = bitpack::pack_u64_dynamic(&sa_samples, &mut packed);
                 packed.truncate(written);
                 sa_bits = packed_w as u8;
                 sa_packed_u64 = Some(packed);
@@ -188,18 +202,11 @@ impl ShardBuilder {
         }
 
         if isa_len > 0 && !can_pack_u32 {
-            let mut samples = Vec::with_capacity(isa_len);
-            for (i, &isa_val) in isa_u64.iter().enumerate() {
-                if i % (self.sample_rate as usize) == 0 {
-                    samples.push(isa_val);
-                }
-            }
-
-            let w = bitpack::required_bits_u64(&samples);
+            let w = bitpack::required_bits_u64(&isa_samples);
             if w < 64 {
-                let words = (samples.len() * w).div_ceil(64);
+                let words = (isa_samples.len() * w).div_ceil(64);
                 let mut packed = vec![0u64; words.max(1)];
-                let (packed_w, written) = bitpack::pack_u64_dynamic(&samples, &mut packed);
+                let (packed_w, written) = bitpack::pack_u64_dynamic(&isa_samples, &mut packed);
                 packed.truncate(written);
                 isa_bits = packed_w as u8;
                 isa_packed_u64 = Some(packed);
@@ -276,11 +283,9 @@ impl ShardBuilder {
         // 7. Write Sampled Suffix Array (SA)
         if sa_bits == 0 {
             let mut int_buffer = [0u8; 8]; // Buffer for u64
-            for (i, &sa_val) in sa_u64.iter().enumerate() {
-                if i % (self.sample_rate as usize) == 0 {
-                    LittleEndian::write_u64(&mut int_buffer, sa_val);
-                    writer.write_all(&int_buffer)?;
-                }
+            for &sa_val in &sa_samples {
+                LittleEndian::write_u64(&mut int_buffer, sa_val);
+                writer.write_all(&int_buffer)?;
             }
         } else if sa_bits <= 32 {
             if let Some(packed) = sa_packed.as_ref() {
@@ -301,11 +306,9 @@ impl ShardBuilder {
         // 8. Write Sampled Inverse Suffix Array (ISA)
         if isa_bits == 0 {
             let mut int_buffer = [0u8; 8]; // Buffer for u64
-            for (i, &isa_val) in isa_u64.iter().enumerate() {
-                if i % (self.sample_rate as usize) == 0 {
-                    LittleEndian::write_u64(&mut int_buffer, isa_val);
-                    writer.write_all(&int_buffer)?;
-                }
+            for &isa_val in &isa_samples {
+                LittleEndian::write_u64(&mut int_buffer, isa_val);
+                writer.write_all(&int_buffer)?;
             }
         } else if isa_bits <= 32 {
             if let Some(packed) = isa_packed.as_ref() {

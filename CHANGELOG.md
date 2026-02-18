@@ -7,11 +7,13 @@
 - Multi-shard query router with merged locate/count across shard directories.
 - CLI support for querying shard directories and extracting documents from shards.
 - Shared cache support for multi-shard readers.
+- Streaming wavelet-tree build from a BWT reader (no in-memory BWT).
 
 ### Changed
 
 - `ShardHeader::new` now uses a params struct to reduce argument count.
 - Minor internal refactors for Clippy hygiene.
+- Builder now streams BWT to disk and samples SA/ISA on the fly (no full BWT/SA/ISA in memory).
 
 ## [0.0.1] - 2026-02-17
 
