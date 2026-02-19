@@ -1,4 +1,5 @@
 use crate::iolib::paged_reader::PagedReader;
+use crate::index::encoding::ALPHABET_SIZE;
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -104,35 +105,39 @@ pub struct HuffmanCode {
 
 #[derive(Clone)]
 enum Node {
-    Leaf(u8),
+    Leaf(u16),
     Internal(usize, usize),
 }
 
-fn count_freq(data: &[u8]) -> [u64; 256] {
-    let mut f = [0u64; 256];
-    for &b in data {
-        f[b as usize] += 1;
+fn count_freq(data: &[u16]) -> [u64; ALPHABET_SIZE] {
+    let mut f = [0u64; ALPHABET_SIZE];
+    for &sym in data {
+        let idx = sym as usize;
+        if idx >= ALPHABET_SIZE {
+            continue;
+        }
+        f[idx] += 1;
     }
     f
 }
 
-pub(crate) fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
+pub(crate) fn huffman_lengths(freq: &[u64; ALPHABET_SIZE]) -> [u8; ALPHABET_SIZE] {
     let mut heap = BinaryHeap::new();
     let mut nodes = Vec::new();
 
     for (sym, &w) in freq.iter().enumerate() {
         if w > 0 {
             let idx = nodes.len();
-            nodes.push(Node::Leaf(sym as u8));
+            nodes.push(Node::Leaf(sym as u16));
             heap.push((Reverse(w), idx));
         }
     }
 
     if heap.is_empty() {
-        return [0u8; 256];
+        return [0u8; ALPHABET_SIZE];
     }
     if heap.len() == 1 {
-        let mut lens = [0u8; 256];
+        let mut lens = [0u8; ALPHABET_SIZE];
         let (_, idx) = heap.pop().unwrap();
         if let Node::Leaf(s) = nodes[idx] {
             lens[s as usize] = 1;
@@ -148,9 +153,9 @@ pub(crate) fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
         heap.push((Reverse(w1 + w2), idx));
     }
 
-    let mut lens = [0u8; 256];
+    let mut lens = [0u8; ALPHABET_SIZE];
     let root = heap.pop().unwrap().1;
-    fn dfs(nodes: &[Node], idx: usize, depth: u8, lens: &mut [u8; 256]) {
+    fn dfs(nodes: &[Node], idx: usize, depth: u8, lens: &mut [u8; ALPHABET_SIZE]) {
         match nodes[idx] {
             Node::Leaf(s) => lens[s as usize] = depth,
             Node::Internal(l, r) => {
@@ -163,16 +168,20 @@ pub(crate) fn huffman_lengths(freq: &[u64; 256]) -> [u8; 256] {
     lens
 }
 
-pub fn canonical_codes(lens: &[u8; 256]) -> [Option<HuffmanCode>; 256] {
-    let mut syms: Vec<(u8, u8)> = (0u16..256)
+pub fn canonical_codes(lens: &[u8; ALPHABET_SIZE]) -> [Option<HuffmanCode>; ALPHABET_SIZE] {
+    let mut syms: Vec<(u16, u8)> = (0..ALPHABET_SIZE)
         .filter_map(|s| {
             let l = lens[s as usize];
-            if l > 0 { Some((s as u8, l)) } else { None }
+            if l > 0 {
+                Some((s as u16, l))
+            } else {
+                None
+            }
         })
         .collect();
     syms.sort_by_key(|&(s, l)| (l, s));
 
-    let mut out = [None; 256];
+    let mut out: [Option<HuffmanCode>; ALPHABET_SIZE] = [None; ALPHABET_SIZE];
     let mut code: u32 = 0;
     let mut prev_len = 0;
 
@@ -197,7 +206,7 @@ pub fn canonical_codes(lens: &[u8; 256]) -> [Option<HuffmanCode>; 256] {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WaveletNodeShape {
     Leaf {
-        symbol: u8,
+        symbol: u16,
     },
     Internal {
         left_idx: usize,
@@ -209,18 +218,18 @@ pub enum WaveletNodeShape {
 
 #[derive(Clone)]
 enum BuilderNode {
-    Leaf(u8),
+    Leaf(u16),
     Internal { left: usize, right: usize },
 }
 
 pub struct WaveletTreeBuilder {
-    pub codes: [Option<HuffmanCode>; 256],
+    pub codes: [Option<HuffmanCode>; ALPHABET_SIZE],
     node_bits: Vec<Vec<bool>>,
     nodes: Vec<BuilderNode>,
 }
 
 impl WaveletTreeBuilder {
-    pub fn new(data: &[u8]) -> Self {
+    pub fn new(data: &[u16]) -> Self {
         let freq = count_freq(data);
         let lens = huffman_lengths(&freq);
         let codes = canonical_codes(&lens);
@@ -234,7 +243,7 @@ impl WaveletTreeBuilder {
         }
     }
 
-    pub fn from_codes(codes: [Option<HuffmanCode>; 256]) -> Self {
+    pub fn from_codes(codes: [Option<HuffmanCode>; ALPHABET_SIZE]) -> Self {
         let nodes = Self::build_nodes(&codes);
         let node_count = nodes.len();
         Self {
@@ -244,27 +253,49 @@ impl WaveletTreeBuilder {
         }
     }
 
-    pub fn process_text(&mut self, data: &[u8]) {
-        for &b in data {
-            self.process_byte(b);
+    pub fn process_symbols(&mut self, data: &[u16]) {
+        for &sym in data {
+            self.process_symbol(sym);
         }
     }
 
-    pub fn process_reader<R: Read>(&mut self, mut reader: R) -> io::Result<()> {
+    pub fn process_reader_u16<R: Read>(&mut self, mut reader: R) -> io::Result<()> {
         let mut buf = [0u8; 8192];
+        let mut carry: Option<u8> = None;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
-            for &b in &buf[..n] {
-                self.process_byte(b);
+            let mut i = 0usize;
+            if let Some(prev) = carry.take() {
+                if i >= n {
+                    carry = Some(prev);
+                    break;
+                }
+                let sym = u16::from_le_bytes([prev, buf[i]]);
+                self.process_symbol(sym);
+                i += 1;
             }
+            while i + 1 < n {
+                let sym = u16::from_le_bytes([buf[i], buf[i + 1]]);
+                self.process_symbol(sym);
+                i += 2;
+            }
+            if i < n {
+                carry = Some(buf[i]);
+            }
+        }
+        if carry.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "trailing byte in u16 stream",
+            ));
         }
         Ok(())
     }
 
-    fn build_nodes(codes: &[Option<HuffmanCode>; 256]) -> Vec<BuilderNode> {
+    fn build_nodes(codes: &[Option<HuffmanCode>; ALPHABET_SIZE]) -> Vec<BuilderNode> {
         let mut nodes = vec![BuilderNode::Internal { left: 0, right: 0 }];
 
         for (sym, code) in codes.iter().enumerate() {
@@ -304,15 +335,16 @@ impl WaveletTreeBuilder {
                         curr_idx = next_child_idx;
                     }
                 }
-                nodes[curr_idx] = BuilderNode::Leaf(sym as u8);
+                nodes[curr_idx] = BuilderNode::Leaf(sym as u16);
             }
         }
 
         nodes
     }
 
-    fn process_byte(&mut self, b: u8) {
-        let code = self.codes[b as usize].unwrap();
+    fn process_symbol(&mut self, symbol: u16) {
+        let idx = symbol as usize;
+        let code = self.codes[idx].unwrap();
         let mut curr = 0;
         for depth in (0..code.len).rev() {
             let bit = (code.bits >> depth) & 1;
@@ -413,7 +445,7 @@ impl WaveletTreeBuilder {
 pub struct PagedWaveletTree {
     global_bv: PagedBitVector,
     nodes: Vec<WaveletNodeShape>,
-    codes: [Option<HuffmanCode>; 256],
+    codes: [Option<HuffmanCode>; ALPHABET_SIZE],
     text_len: usize,
 }
 
@@ -421,7 +453,7 @@ impl PagedWaveletTree {
     pub fn new(
         reader: PagedReader,
         nodes: Vec<WaveletNodeShape>,
-        codes: [Option<HuffmanCode>; 256],
+        codes: [Option<HuffmanCode>; ALPHABET_SIZE],
         text_len: usize,
         wt_start_offset: u64,
     ) -> Self {
@@ -443,7 +475,7 @@ impl PagedWaveletTree {
         }
     }
 
-    pub fn rank(&self, symbol: u8, mut i: usize) -> io::Result<usize> {
+    pub fn rank(&self, symbol: u16, mut i: usize) -> io::Result<usize> {
         if i == 0 {
             return Ok(0);
         }
@@ -451,7 +483,12 @@ impl PagedWaveletTree {
             i = self.text_len;
         }
 
-        let code = match self.codes[symbol as usize] {
+        let idx = symbol as usize;
+        if idx >= self.codes.len() {
+            return Ok(0);
+        }
+
+        let code = match self.codes[idx] {
             Some(c) => c,
             None => return Ok(0),
         };
@@ -490,7 +527,7 @@ impl PagedWaveletTree {
     }
 
     /// Retrieve the symbol at index `i` (BWT[i])
-    pub fn access(&self, mut i: usize) -> io::Result<u8> {
+    pub fn access(&self, mut i: usize) -> io::Result<u16> {
         if i >= self.text_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -540,10 +577,10 @@ mod tests {
     use tempfile::NamedTempFile;
 
     // Helper: Runs a full cycle of build -> save -> load -> query
-    fn run_wavelet_test(text: &[u8]) {
+    fn run_wavelet_test(text: &[u16]) {
         // 1. Build
         let mut builder = WaveletTreeBuilder::new(text);
-        builder.process_text(text);
+        builder.process_symbols(text);
         let codes_copy = builder.codes; // Keep for reader
 
         // 2. Write
@@ -558,7 +595,7 @@ mod tests {
 
         // 4. Verify Rank for ALL characters at ALL positions
         // This is the "Hero Test"
-        let symbols: Vec<u8> = text
+        let symbols: Vec<u16> = text
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>()
@@ -581,14 +618,15 @@ mod tests {
 
     #[test]
     fn test_simple_string() {
-        run_wavelet_test(b"banana");
+        let text: Vec<u16> = b"banana".iter().map(|&b| b as u16).collect();
+        run_wavelet_test(&text);
     }
 
     #[test]
     fn test_skewed_distribution() {
         // A:8, B:4, C:2, D:1 - Perfect Huffman powers of 2
-        let text = b"aaaaaaaabbbbccde";
-        run_wavelet_test(text);
+        let text: Vec<u16> = b"aaaaaaaabbbbccde".iter().map(|&b| b as u16).collect();
+        run_wavelet_test(&text);
     }
 
     #[test]
@@ -598,18 +636,19 @@ mod tests {
         let len = 40_000;
         let mut text = Vec::with_capacity(len);
         for i in 0..len {
-            text.push(if i % 3 == 0 { b'A' } else { b'B' });
+            let sym = if i % 3 == 0 { b'A' } else { b'B' };
+            text.push(sym as u16);
         }
         run_wavelet_test(&text);
     }
 
     #[test]
     fn test_full_byte_range() {
-        // Force a complex tree with 256 leaves
+        // Force a complex tree with full byte range (+256 for binary mode)
         let mut text = Vec::new();
-        for i in 0..=255 {
-            text.push(i as u8);
-            text.push(i as u8); // Ensure freq > 0
+        for i in 0..=256u16 {
+            text.push(i);
+            text.push(i); // Ensure freq > 0
         }
         run_wavelet_test(&text);
     }
@@ -627,7 +666,7 @@ mod comprehensive_tests {
 
     // --- Fuzz Testing Utility ---
     // Generates random text, builds tree, verifies rank queries match naive implementation.
-    fn fuzz_wavelet_tree(alphabet_size: u8, len: usize, seed: u64) {
+    fn fuzz_wavelet_tree(alphabet_size: u16, len: usize, seed: u64) {
         let mut rng = StdRng::seed_from_u64(seed);
 
         // 1. Generate Random Text
@@ -639,7 +678,7 @@ mod comprehensive_tests {
 
         // 2. Build Tree
         let mut builder = WaveletTreeBuilder::new(&text);
-        builder.process_text(&text);
+        builder.process_symbols(&text);
         let codes_copy = builder.codes;
 
         let mut file = NamedTempFile::new().unwrap();
@@ -654,7 +693,7 @@ mod comprehensive_tests {
         // 4. Verify Rank
         // Check random positions and symbols
         for _ in 0..1000 {
-            // Use saturating_add so u8::MAX doesn't overflow; when full range is used,
+            // Use saturating_add so u16::MAX doesn't overflow; when full range is used,
             // we can't generate a non-existent symbol anyway.
             let upper = alphabet_size.saturating_add(1);
             let query_sym = rng.random_range(0..=upper); // +1 to check non-existent chars when possible
@@ -687,7 +726,7 @@ mod comprehensive_tests {
 
     #[test]
     fn test_fuzz_full_alphabet_medium() {
-        // 255 symbols, 10,000 length
+        // 256 symbols, 10,000 length (0..=255)
         fuzz_wavelet_tree(255, 10_000, 999);
     }
 
@@ -703,11 +742,11 @@ mod comprehensive_tests {
         let len = 100_000;
         let mut text = Vec::with_capacity(len);
         for i in 0..len {
-            text.push((i % 2) as u8); // 0, 1, 0, 1...
+            text.push((i % 2) as u16); // 0, 1, 0, 1...
         }
 
         let mut builder = WaveletTreeBuilder::new(&text);
-        builder.process_text(&text);
+        builder.process_symbols(&text);
         let codes = builder.codes;
 
         let mut file = NamedTempFile::new().unwrap();
@@ -733,9 +772,9 @@ mod comprehensive_tests {
 
     #[test]
     fn test_edge_case_empty_input() {
-        let text: Vec<u8> = vec![];
+        let text: Vec<u16> = vec![];
         let mut builder = WaveletTreeBuilder::new(&text);
-        builder.process_text(&text);
+        builder.process_symbols(&text);
 
         // FIX: Extract codes before 'builder' is consumed by 'write_to_file'
         let codes = builder.codes;
@@ -750,6 +789,6 @@ mod comprehensive_tests {
         // Use the extracted codes
         let wt = PagedWaveletTree::new(reader, shape, codes, 0, wt_start);
 
-        assert_eq!(wt.rank(b'a', 0).unwrap(), 0);
+        assert_eq!(wt.rank(b'a' as u16, 0).unwrap(), 0);
     }
 }

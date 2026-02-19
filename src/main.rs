@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use rust_fm_index::ingest::config::{IngestConfigFile, parse_size, size_value_to_usize};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
-use rust_fm_index::{IndexBuilder, IndexReader, MultiShardReader};
+use rust_fm_index::{EncodingMode, IndexBuilder, IndexReader, MultiShardReader};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -30,6 +30,9 @@ struct BuildArgs {
     output: PathBuf,
     #[arg(long, default_value_t = 32)]
     sample_rate: u32,
+    /// Enable binary mode (b+1 encoding with reserved sentinel)
+    #[arg(long)]
+    binary: bool,
 }
 
 #[derive(Args)]
@@ -39,6 +42,9 @@ struct BuildMultiArgs {
     inputs: Vec<PathBuf>,
     #[arg(long, default_value_t = 32)]
     sample_rate: u32,
+    /// Enable binary mode (b+1 encoding with reserved sentinel)
+    #[arg(long)]
+    binary: bool,
 }
 
 #[derive(Args)]
@@ -64,6 +70,9 @@ struct IngestArgs {
     /// SA/ISA sample rate
     #[arg(long)]
     sample_rate: Option<u32>,
+    /// Enable binary mode (b+1 encoding with reserved sentinel)
+    #[arg(long)]
+    binary: bool,
 }
 
 #[derive(Args)]
@@ -108,7 +117,12 @@ fn run_build(args: BuildArgs) {
     let start = Instant::now();
 
     let data = std::fs::read(&args.input).expect("Failed to read input");
-    let builder = IndexBuilder::new(args.sample_rate);
+    let encoding_mode = if args.binary {
+        EncodingMode::Binary
+    } else {
+        EncodingMode::Text
+    };
+    let builder = IndexBuilder::new(args.sample_rate).with_encoding_mode(encoding_mode);
     builder
         .build_single_document(&data, &args.output)
         .expect("Build failed");
@@ -298,7 +312,12 @@ fn run_build_multi(args: BuildMultiArgs) {
     println!("Building multi-document index -> {:?}", args.output);
     let start = Instant::now();
 
-    let builder = IndexBuilder::new(args.sample_rate);
+    let encoding_mode = if args.binary {
+        EncodingMode::Binary
+    } else {
+        EncodingMode::Text
+    };
+    let builder = IndexBuilder::new(args.sample_rate).with_encoding_mode(encoding_mode);
     let input_paths = args.inputs.clone();
     builder
         .build_multi_from_paths(&args.output, &input_paths)
@@ -377,6 +396,17 @@ fn run_ingest(args: IngestArgs) {
         .or_else(|| file_cfg.as_ref().and_then(|c| c.sample_rate))
         .unwrap_or(32);
 
+    let binary_mode = if args.binary {
+        true
+    } else {
+        file_cfg.as_ref().and_then(|c| c.binary_mode).unwrap_or(false)
+    };
+    let encoding_mode = if binary_mode {
+        EncodingMode::Binary
+    } else {
+        EncodingMode::Text
+    };
+
     println!("Starting distributed ingestion");
     println!("Patterns: {:?}", input_patterns);
     println!("Output: {:?}", output_dir);
@@ -392,6 +422,7 @@ fn run_ingest(args: IngestArgs) {
     );
     println!("Workers: {}", workers);
     println!("Sample rate: {}", sample_rate);
+    println!("Encoding mode: {:?}", encoding_mode);
 
     let config = IngestConfig {
         input_patterns,
@@ -400,6 +431,7 @@ fn run_ingest(args: IngestArgs) {
         read_buffer,
         num_workers: workers,
         sample_rate,
+        encoding_mode,
     };
 
     let orchestrator = Orchestrator::new(config);

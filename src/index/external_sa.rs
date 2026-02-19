@@ -91,7 +91,7 @@ impl Iterator for SaFileIter {
     }
 }
 
-pub fn build_sa_external(text: &[u8], mem_limit_bytes: usize) -> io::Result<SaStream> {
+pub fn build_sa_external(text: &[u16], mem_limit_bytes: usize) -> io::Result<SaStream> {
     let n = text.len();
     if n == 0 {
         return Err(io::Error::new(
@@ -106,7 +106,7 @@ pub fn build_sa_external(text: &[u8], mem_limit_bytes: usize) -> io::Result<SaSt
         chunk_len = 1;
     }
 
-    // Rank 0: 1-byte alphabet. Use 0 as sentinel for out-of-range.
+    // Rank 0: Use 0 as sentinel for out-of-range.
     let mut rank: Vec<u64> = text.iter().map(|&b| b as u64 + 1).collect();
     let mut step = 1usize;
 

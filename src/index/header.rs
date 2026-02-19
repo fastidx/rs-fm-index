@@ -1,30 +1,48 @@
+use crate::index::encoding::{EncodingMode, ALPHABET_SIZE};
 use crate::index::wavelet::{HuffmanCode, WaveletNodeShape};
 use serde::{Deserialize, Serialize};
 use std::io;
 
 mod serde_arrays {
-    use super::HuffmanCode;
+    use super::{HuffmanCode, ALPHABET_SIZE};
     use serde::de::Error as DeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize_c_table<S>(value: &[u64; 256], serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize_c_table<S>(
+        value: &[u64; ALPHABET_SIZE],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         value.as_slice().serialize(serializer)
     }
 
-    pub fn deserialize_c_table<'de, D>(deserializer: D) -> Result<[u64; 256], D::Error>
+    pub fn deserialize_c_table<'de, D>(
+        deserializer: D,
+    ) -> Result<[u64; ALPHABET_SIZE], D::Error>
     where
         D: Deserializer<'de>,
     {
         let vec = Vec::<u64>::deserialize(deserializer)?;
-        vec.try_into()
-            .map_err(|vec: Vec<u64>| D::Error::invalid_length(vec.len(), &"256 elements"))
+        if vec.len() == ALPHABET_SIZE {
+            return vec.try_into().map_err(|vec: Vec<u64>| {
+                D::Error::invalid_length(vec.len(), &"257 elements")
+            });
+        }
+        if vec.len() == ALPHABET_SIZE - 1 {
+            let mut out = [0u64; ALPHABET_SIZE];
+            out[..ALPHABET_SIZE - 1].copy_from_slice(&vec);
+            return Ok(out);
+        }
+        Err(D::Error::invalid_length(
+            vec.len(),
+            &"256 or 257 elements",
+        ))
     }
 
     pub fn serialize_codes<S>(
-        value: &[Option<HuffmanCode>; 256],
+        value: &[Option<HuffmanCode>; ALPHABET_SIZE],
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -35,24 +53,37 @@ mod serde_arrays {
 
     pub fn deserialize_codes<'de, D>(
         deserializer: D,
-    ) -> Result<[Option<HuffmanCode>; 256], D::Error>
+    ) -> Result<[Option<HuffmanCode>; ALPHABET_SIZE], D::Error>
     where
         D: Deserializer<'de>,
     {
         let vec = Vec::<Option<HuffmanCode>>::deserialize(deserializer)?;
-        vec.try_into().map_err(|vec: Vec<Option<HuffmanCode>>| {
-            D::Error::invalid_length(vec.len(), &"256 elements")
-        })
+        if vec.len() == ALPHABET_SIZE {
+            return vec.try_into().map_err(|vec: Vec<Option<HuffmanCode>>| {
+                D::Error::invalid_length(vec.len(), &"257 elements")
+            });
+        }
+        if vec.len() == ALPHABET_SIZE - 1 {
+            let mut out: [Option<HuffmanCode>; ALPHABET_SIZE] = [None; ALPHABET_SIZE];
+            out[..ALPHABET_SIZE - 1].copy_from_slice(&vec);
+            return Ok(out);
+        }
+        Err(D::Error::invalid_length(
+            vec.len(),
+            &"256 or 257 elements",
+        ))
     }
 }
 
 pub const MAGIC_BYTES: u64 = 0x464D_5F49_4E44_4558; // "FM_INDEX" in hex
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ShardHeader {
     pub magic: u64,
     pub version: u32,
+    #[serde(default)]
+    pub encoding_mode: EncodingMode,
     pub text_len: u64,
     pub sa_sample_rate: u32,
     pub isa_sample_rate: u32,
@@ -67,12 +98,12 @@ pub struct ShardHeader {
         serialize_with = "serde_arrays::serialize_c_table",
         deserialize_with = "serde_arrays::deserialize_c_table"
     )]
-    pub c_table: [u64; 256], // Start index of each character in F-column
+    pub c_table: [u64; ALPHABET_SIZE], // Start index of each character in F-column
     #[serde(
         serialize_with = "serde_arrays::serialize_codes",
         deserialize_with = "serde_arrays::deserialize_codes"
     )]
-    pub codes: [Option<HuffmanCode>; 256], // Huffman Codebook
+    pub codes: [Option<HuffmanCode>; ALPHABET_SIZE], // Huffman Codebook
     pub tree_shape: Vec<WaveletNodeShape>, // Wavelet Tree Topology
 
     // File Offsets (Pointers to Paged Data)
@@ -86,13 +117,14 @@ pub struct ShardHeader {
 }
 
 pub struct ShardHeaderParams {
+    pub encoding_mode: EncodingMode,
     pub text_len: u64,
     pub sa_sample_rate: u32,
     pub isa_sample_rate: u32,
     pub sa_bits: u8,
     pub isa_bits: u8,
-    pub c_table: [u64; 256],
-    pub codes: [Option<HuffmanCode>; 256],
+    pub c_table: [u64; ALPHABET_SIZE],
+    pub codes: [Option<HuffmanCode>; ALPHABET_SIZE],
     pub tree_shape: Vec<WaveletNodeShape>,
     pub doc_offsets: Vec<u64>,
 }
@@ -100,6 +132,7 @@ pub struct ShardHeaderParams {
 impl ShardHeader {
     pub fn new(params: ShardHeaderParams) -> Self {
         let ShardHeaderParams {
+            encoding_mode,
             text_len,
             sa_sample_rate,
             isa_sample_rate,
@@ -117,6 +150,7 @@ impl ShardHeader {
         Self {
             magic: MAGIC_BYTES,
             version: CURRENT_VERSION,
+            encoding_mode,
             text_len,
             sa_sample_rate,
             isa_sample_rate,

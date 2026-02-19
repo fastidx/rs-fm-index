@@ -164,13 +164,21 @@ let doc = reader.get_document(doc_id)?;
 
 ## Sentinel Requirements
 
-The implementation uses **byte `0` as a sentinel**. That means:
+The implementation uses **byte `0` as a sentinel**.
+
+Text mode (default):
 
 - Input documents **must not contain `0` bytes**.
 - Single-doc builds add the sentinel automatically.
 - Multi-doc builds append a single trailing `0`; document boundaries are tracked via doc offsets.
 
-If your input can contain `0`, you’ll need to escape it or use a different sentinel strategy (not implemented yet).
+Binary mode:
+
+- Enable with `--binary` (CLI) or `IndexBuilder::with_encoding_mode(EncodingMode::Binary)`.
+- Input bytes are remapped with `b + 1`, and `0` is reserved for the sentinel.
+- Queries/extracts are decoded automatically; the mode is stored in the header.
+
+If your input can contain `0`, use binary mode.
 
 ---
 

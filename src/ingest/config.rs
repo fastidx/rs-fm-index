@@ -11,6 +11,7 @@ pub struct IngestConfigFile {
     pub read_buffer: Option<SizeValue>,
     pub num_workers: Option<usize>,
     pub sample_rate: Option<u32>,
+    pub binary_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

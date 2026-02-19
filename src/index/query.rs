@@ -1,3 +1,4 @@
+use crate::index::encoding::{strategy_for, EncodingMode};
 use crate::index::header::ShardHeader;
 use crate::index::sampled_sa::PagedSampledSA;
 use crate::index::wavelet::PagedWaveletTree;
@@ -11,6 +12,7 @@ pub struct QueryEngine {
     isa: PagedSampledSA,
     doc_offsets: Vec<u64>,
     text_len: usize,
+    encoding_mode: EncodingMode,
 }
 
 impl QueryEngine {
@@ -48,6 +50,7 @@ impl QueryEngine {
 
         Self {
             text_len: header.text_len as usize,
+            encoding_mode: header.encoding_mode,
             header,
             wt,
             sa,
@@ -60,19 +63,28 @@ impl QueryEngine {
     /// Returns the range [sp, ep] in the suffix array rows.
     /// If sp > ep, pattern is not found.
     pub fn count(&self, pattern: &[u8]) -> io::Result<(usize, usize)> {
+        let encoder = strategy_for(self.encoding_mode);
+        let encoded = encoder.encode_pattern(pattern)?;
+        if encoded.is_empty() {
+            return Ok((0, self.text_len.saturating_sub(1)));
+        }
         let mut sp = 0;
         let mut ep = self.text_len - 1;
 
         // Backward search
-        for &char_byte in pattern.iter().rev() {
-            let c = char_byte as usize;
+        for &symbol in encoded.iter().rev() {
+            let c = symbol as usize;
 
             // Get start of char range in F-column
             let c_start = self.header.c_table[c] as usize;
 
             // Check if char exists in text
-            let c_next = if c < 255 {
-                self.header.c_table[c + 1] as usize
+            let c_next = if c + 1 < self.header.c_table.len() {
+                if self.header.version < 3 && c + 1 == self.header.c_table.len() - 1 {
+                    self.text_len
+                } else {
+                    self.header.c_table[c + 1] as usize
+                }
             } else {
                 self.text_len
             };
@@ -84,9 +96,9 @@ impl QueryEngine {
             let rank_start = if sp == 0 {
                 0
             } else {
-                self.wt.rank(char_byte, sp)?
+                self.wt.rank(symbol, sp)?
             };
-            let rank_end = self.wt.rank(char_byte, ep + 1)?;
+            let rank_end = self.wt.rank(symbol, ep + 1)?;
 
             sp = c_start + rank_start;
             ep = c_start + rank_end - 1;
@@ -127,6 +139,7 @@ impl QueryEngine {
             ));
         }
 
+        let encoder = strategy_for(self.encoding_mode);
         let mut result = vec![0u8; len];
 
         // Start extracting from the END of the requested segment.
@@ -138,7 +151,7 @@ impl QueryEngine {
         for i in (0..len).rev() {
             // Get char at this row (which is the preceding char in text)
             let c = self.wt.access(curr_row)?;
-            result[i] = c;
+            result[i] = encoder.decode_symbol_for_extract(c)?;
 
             // Walk LF to move to the row for this char
             curr_row = self.lf_step(curr_row)?;
@@ -253,8 +266,10 @@ impl QueryEngine {
         };
 
         let mut bytes = self.extract(start, end - start)?;
-        if let Some(&0) = bytes.last() {
-            bytes.pop();
+        if self.encoding_mode == EncodingMode::Text {
+            if let Some(&0) = bytes.last() {
+                bytes.pop();
+            }
         }
         Ok(bytes)
     }

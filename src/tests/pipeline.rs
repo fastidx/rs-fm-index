@@ -1,4 +1,5 @@
 use crate::index::builder::ShardBuilder;
+use crate::index::encoding::{EncodingMode, ALPHABET_SIZE};
 use crate::index::header::{ShardHeader, CURRENT_VERSION, MAGIC_BYTES};
 use crate::index::sampled_sa::PagedSampledSA;
 use crate::index::wavelet::{HuffmanCode, PagedWaveletTree, WaveletNodeShape};
@@ -23,16 +24,16 @@ fn sample_count(len: usize, rate: u32) -> usize {
     }
 }
 
-fn build_bwt(text: &[u8]) -> Vec<u8> {
+fn build_bwt(text: &[u8]) -> Vec<u16> {
     let (_, sa) = div_sort(text).into_parts();
     let len = text.len();
     let mut bwt = Vec::with_capacity(len);
     for &sa_val in &sa {
         let pos = sa_val as usize;
         if pos == 0 {
-            bwt.push(text[len - 1]);
+            bwt.push(text[len - 1] as u16);
         } else {
-            bwt.push(text[pos - 1]);
+            bwt.push(text[pos - 1] as u16);
         }
     }
     bwt
@@ -40,14 +41,14 @@ fn build_bwt(text: &[u8]) -> Vec<u8> {
 
 #[test]
 fn test_header_roundtrip() {
-    let mut c_table = [0u64; 256];
-    for i in 0..256 {
+    let mut c_table = [0u64; ALPHABET_SIZE];
+    for i in 0..ALPHABET_SIZE {
         c_table[i] = (i as u64) * 7;
     }
 
-    let mut codes = [None; 256];
+    let mut codes: [Option<HuffmanCode>; ALPHABET_SIZE] = [None; ALPHABET_SIZE];
     codes[0] = Some(HuffmanCode { bits: 0b1, len: 1 });
-    codes[255] = Some(HuffmanCode { bits: 0b10, len: 2 });
+    codes[ALPHABET_SIZE - 1] = Some(HuffmanCode { bits: 0b10, len: 2 });
 
     let tree_shape = vec![
         WaveletNodeShape::Internal {
@@ -57,11 +58,14 @@ fn test_header_roundtrip() {
             bit_len: 456,
         },
         WaveletNodeShape::Leaf { symbol: 0 },
-        WaveletNodeShape::Leaf { symbol: 255 },
+        WaveletNodeShape::Leaf {
+            symbol: (ALPHABET_SIZE - 1) as u16,
+        },
     ];
 
     let doc_offsets = vec![0u64, 5, 10, 20, 21];
     let mut header = ShardHeader::new(crate::index::header::ShardHeaderParams {
+        encoding_mode: EncodingMode::Text,
         text_len: 101,
         sa_sample_rate: 4,
         isa_sample_rate: 4,
@@ -86,17 +90,18 @@ fn test_header_roundtrip() {
     assert_eq!(decoded.sa_sample_rate, 4);
     assert_eq!(decoded.wt_start_offset, 777);
     assert_eq!(decoded.sa_start_offset, 888);
+    assert_eq!(decoded.encoding_mode, EncodingMode::Text);
     assert_eq!(decoded.tree_shape.len(), tree_shape.len());
     assert_eq!(decoded.c_table[10], c_table[10]);
     assert_eq!(decoded.codes[0], codes[0]);
-    assert_eq!(decoded.codes[255], codes[255]);
+    assert_eq!(decoded.codes[ALPHABET_SIZE - 1], codes[ALPHABET_SIZE - 1]);
     let decoded_offsets = decoded.decode_doc_offsets().unwrap();
     assert_eq!(decoded_offsets, doc_offsets);
 }
 
 #[test]
 fn test_builder_offsets_and_lengths() {
-    let text = b"banana\0";
+    let text = b"banana";
     let sample_rate = 3;
     let builder = ShardBuilder::new(sample_rate);
     let tmp_file = NamedTempFile::new().unwrap();
@@ -127,11 +132,12 @@ fn test_builder_offsets_and_lengths() {
     } else {
         64
     } as u64;
+    let indexed_len = text.len() + 1;
     let sa_words =
-        ((sample_count(text.len(), sample_rate) as u64 * sa_bits) + sa_word_bits - 1)
+        ((sample_count(indexed_len, sample_rate) as u64 * sa_bits) + sa_word_bits - 1)
             / sa_word_bits;
     let isa_words =
-        ((sample_count(text.len(), header.isa_sample_rate) as u64 * isa_bits) + isa_word_bits - 1)
+        ((sample_count(indexed_len, header.isa_sample_rate) as u64 * isa_bits) + isa_word_bits - 1)
             / isa_word_bits;
     let expected_sa_bytes = sa_words * (sa_word_bits / 8);
     let expected_isa_bytes = isa_words * (isa_word_bits / 8);
@@ -141,7 +147,7 @@ fn test_builder_offsets_and_lengths() {
 
 #[test]
 fn test_sampled_sa_matches_reference() {
-    let text = b"mississippi\0";
+    let text = b"mississippi";
     let sample_rate = 4;
     let builder = ShardBuilder::new(sample_rate);
     let tmp_file = NamedTempFile::new().unwrap();
@@ -151,10 +157,15 @@ fn test_sampled_sa_matches_reference() {
     let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1));
     let reader = PagedReader::new(tmp_file.path(), 999, cache).unwrap();
 
-    let sa_len = sample_count(text.len(), sample_rate);
+    let indexed = {
+        let mut data = Vec::from(text.as_slice());
+        data.push(0);
+        data
+    };
+    let sa_len = sample_count(indexed.len(), sample_rate);
     let sa = PagedSampledSA::new(reader, sa_len, header.sa_start_offset, header.sa_bits);
 
-    let (_, full_sa) = div_sort(text).into_parts();
+    let (_, full_sa) = div_sort(&indexed).into_parts();
     let expected: Vec<u64> = full_sa
         .iter()
         .step_by(sample_rate as usize)
@@ -175,7 +186,11 @@ fn test_wavelet_rank_matches_naive_random() {
     for _ in 0..len {
         text.push(rng.random_range(1..=15));
     }
-    text.push(0);
+    let indexed = {
+        let mut data = text.clone();
+        data.push(0);
+        data
+    };
 
     let sample_rate = 5;
     let builder = ShardBuilder::new(sample_rate);
@@ -193,10 +208,10 @@ fn test_wavelet_rank_matches_naive_random() {
         header.wt_start_offset,
     );
 
-    let bwt = build_bwt(&text);
+    let bwt = build_bwt(&indexed);
     for _ in 0..200 {
-        let sym = rng.random_range(0..=15);
-        let idx = rng.random_range(0..=text.len());
+        let sym = rng.random_range(0..=15) as u16;
+        let idx = rng.random_range(0..=indexed.len());
         let expected = bwt[..idx].iter().filter(|&&c| c == sym).count();
         let actual = wt.rank(sym, idx).unwrap();
         assert_eq!(actual, expected);
@@ -205,8 +220,8 @@ fn test_wavelet_rank_matches_naive_random() {
 
 #[test]
 fn test_full_ingestion_pipeline() {
-    // 1. Prepare Data (with sentinel)
-    let text = b"mississippi\0";
+    // 1. Prepare Data (sentinel appended during build)
+    let text = b"mississippi";
 
     // 2. Run Builder
     let builder = ShardBuilder::new(4); // Sample rate = 4
@@ -215,7 +230,7 @@ fn test_full_ingestion_pipeline() {
 
     // 3. Parse Header
     let header = decode_header_from_path(tmp_file.path());
-    assert_eq!(header.text_len, text.len() as u64);
+    assert_eq!(header.text_len, (text.len() + 1) as u64);
     assert_eq!(header.sa_sample_rate, 4);
 
     // 4. Initialize Paged Structures
@@ -225,7 +240,7 @@ fn test_full_ingestion_pipeline() {
     // 4a. Sampled SA
     let sa = PagedSampledSA::new(
         reader.clone(),
-        sample_count(text.len(), 4),
+        sample_count(text.len() + 1, 4),
         header.sa_start_offset,
         header.sa_bits,
     );
@@ -238,17 +253,17 @@ fn test_full_ingestion_pipeline() {
         reader,
         header.tree_shape,
         header.codes,
-        text.len(),
+        header.text_len as usize,
         header.wt_start_offset,
     );
 
-    let rank_i = wt.rank(b'i', 12).unwrap();
+    let rank_i = wt.rank(b'i' as u16, 12).unwrap();
     assert_eq!(rank_i, 4);
 
-    let rank_s = wt.rank(b's', 12).unwrap();
+    let rank_s = wt.rank(b's' as u16, 12).unwrap();
     assert_eq!(rank_s, 4);
 
-    let rank_m = wt.rank(b'm', 12).unwrap();
+    let rank_m = wt.rank(b'm' as u16, 12).unwrap();
     assert_eq!(rank_m, 1);
 }
 
@@ -275,6 +290,7 @@ fn test_orchestrator_chunking() {
         read_buffer: 64,
         num_workers: 2,
         sample_rate: 4,
+        encoding_mode: EncodingMode::Text,
     };
 
     let orch = Orchestrator::new(config);
@@ -324,6 +340,7 @@ fn test_orchestrator_oversized_split_metadata() {
         read_buffer: 64,
         num_workers: 2,
         sample_rate: 4,
+        encoding_mode: EncodingMode::Text,
     };
 
     let orch = Orchestrator::new(config);

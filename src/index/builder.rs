@@ -1,4 +1,4 @@
-use byteorder::{ByteOrder, LittleEndian};
+use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use cdivsufsort::sort as div_sort; // Using the cdivsufsort crate
 use std::env;
 use std::fs::File;
@@ -6,6 +6,7 @@ use std::io::{self, BufWriter, Cursor, Write};
 use std::path::Path;
 
 use crate::index::bitpack;
+use crate::index::encoding::{strategy_for, EncodingMode, ALPHABET_SIZE, SENTINEL};
 use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
 use crate::index::wavelet::{canonical_codes, huffman_lengths, WaveletTreeBuilder};
@@ -13,6 +14,7 @@ use tempfile::NamedTempFile;
 
 pub struct ShardBuilder {
     sample_rate: u32,
+    encoding_mode: EncodingMode,
 }
 
 const EXTERNAL_SA_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
@@ -25,7 +27,17 @@ enum SaSource {
 
 impl ShardBuilder {
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate }
+        Self {
+            sample_rate,
+            encoding_mode: EncodingMode::Text,
+        }
+    }
+
+    pub fn new_with_mode(sample_rate: u32, encoding_mode: EncodingMode) -> Self {
+        Self {
+            sample_rate,
+            encoding_mode,
+        }
     }
 
     /// Consumes a chunk of text and writes a complete .idx file
@@ -40,6 +52,7 @@ impl ShardBuilder {
         doc_offsets: Vec<u64>,
         output_path: P,
     ) -> io::Result<()> {
+        let encoder = strategy_for(self.encoding_mode);
         if self.sample_rate == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -74,23 +87,40 @@ impl ShardBuilder {
                 "text must be non-empty",
             ));
         }
-        if *text.last().unwrap() != 0 {
+        let encoded = encoder.encode_text(text)?;
+
+        self.build_encoded(&encoded, doc_offsets, output_path)
+    }
+
+    fn build_encoded<P: AsRef<Path>>(
+        &self,
+        text: &[u16],
+        doc_offsets: Vec<u64>,
+        output_path: P,
+    ) -> io::Result<()> {
+        if text.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "text must be non-empty",
+            ));
+        }
+        if *text.last().unwrap() != SENTINEL {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "text must end with a 0 sentinel",
             ));
         }
-        if text[..text.len() - 1].contains(&0) {
+        if text[..text.len() - 1].contains(&SENTINEL) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "text contains 0 byte before sentinel; separators are no longer supported",
+                "text contains 0 symbol before sentinel; separators are not supported",
             ));
         }
 
         let mut writer = std::io::BufWriter::new(File::create(output_path)?);
 
         // 1. Compute Suffix Array (Heavy Computation)
-        let sa_source = build_sa_source(text)?;
+        let sa_source = build_sa_source(text, self.encoding_mode)?;
 
         // 2. Build BWT + samples using an external-memory pipeline
         // BWT[i] = Text[SA[i] - 1] (cyclic)
@@ -104,11 +134,11 @@ impl ShardBuilder {
         let mut sa_samples: Vec<u64> = Vec::with_capacity(sa_len);
         let mut isa_samples: Vec<u64> = vec![0u64; isa_len];
 
-        let mut counts = [0u64; 256];
+        let mut counts = [0u64; ALPHABET_SIZE];
         let mut bwt_file = NamedTempFile::new()?;
         {
             let mut writer = BufWriter::new(bwt_file.as_file_mut());
-            let mut buffer = Vec::with_capacity(8 * 1024 * 1024);
+            let mut buffer: Vec<u16> = Vec::with_capacity(4 * 1024 * 1024);
 
             match sa_source {
                 SaSource::InMemory(ref sa_i32) => {
@@ -125,13 +155,14 @@ impl ShardBuilder {
                             }
                         }
 
-                        let bwt_byte = if pos == 0 { text[len - 1] } else { text[pos - 1] };
-                        counts[bwt_byte as usize] += 1;
-                        buffer.push(bwt_byte);
+                        let bwt_sym = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                        counts[bwt_sym as usize] += 1;
+                        buffer.push(bwt_sym);
 
-                        if buffer.len() >= 8 * 1024 * 1024 {
-                            writer.write_all(&buffer)?;
-                            buffer.clear();
+                        if buffer.len() >= 4 * 1024 * 1024 {
+                            for sym in buffer.drain(..) {
+                                writer.write_u16::<LittleEndian>(sym)?;
+                            }
                         }
                     }
                 }
@@ -150,20 +181,23 @@ impl ShardBuilder {
                             }
                         }
 
-                        let bwt_byte = if pos == 0 { text[len - 1] } else { text[pos - 1] };
-                        counts[bwt_byte as usize] += 1;
-                        buffer.push(bwt_byte);
+                        let bwt_sym = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                        counts[bwt_sym as usize] += 1;
+                        buffer.push(bwt_sym);
 
-                        if buffer.len() >= 8 * 1024 * 1024 {
-                            writer.write_all(&buffer)?;
-                            buffer.clear();
+                        if buffer.len() >= 4 * 1024 * 1024 {
+                            for sym in buffer.drain(..) {
+                                writer.write_u16::<LittleEndian>(sym)?;
+                            }
                         }
                     }
                 }
             }
 
             if !buffer.is_empty() {
-                writer.write_all(&buffer)?;
+                for sym in buffer.drain(..) {
+                    writer.write_u16::<LittleEndian>(sym)?;
+                }
             }
             writer.flush()?;
         }
@@ -177,9 +211,9 @@ impl ShardBuilder {
 
         // 3. Compute C-Table
         // C[x] = total count of characters lexicographically smaller than x
-        let mut c_table = [0u64; 256];
+        let mut c_table = [0u64; ALPHABET_SIZE];
         let mut sum = 0;
-        for i in 0..256 {
+        for i in 0..ALPHABET_SIZE {
             c_table[i] = sum;
             sum += counts[i];
         }
@@ -191,7 +225,7 @@ impl ShardBuilder {
 
         let bwt_read = bwt_file.reopen()?;
         let mut bwt_reader = std::io::BufReader::new(bwt_read);
-        wt_builder.process_reader(&mut bwt_reader)?;
+        wt_builder.process_reader_u16(&mut bwt_reader)?;
 
         // 5. Write Wavelet Tree to a buffer first so we can size the header correctly
         let mut wt_buf = Cursor::new(Vec::new());
@@ -267,6 +301,7 @@ impl ShardBuilder {
 
         // Prepare Header (with placeholder offsets)
         let mut header = ShardHeader::new(ShardHeaderParams {
+            encoding_mode: self.encoding_mode,
             text_len: len as u64,
             sa_sample_rate: self.sample_rate,
             isa_sample_rate: self.sample_rate, // Use same rate for ISA
@@ -381,16 +416,27 @@ impl ShardBuilder {
     }
 }
 
-fn build_sa_source(text: &[u8]) -> io::Result<SaSource> {
-    if should_use_external_sa(text.len()) {
+fn build_sa_source(text: &[u16], encoding_mode: EncodingMode) -> io::Result<SaSource> {
+    if encoding_mode == EncodingMode::Binary || should_use_external_sa(text.len()) {
         let mem_limit = external_sa_mem_limit();
         let stream = external_sa::build_sa_external(text, mem_limit)?;
-        Ok(SaSource::External(stream))
-    } else {
-        // cdivsufsort returns Vec<i32>
-        let (_, sa_i32) = div_sort(text).into_parts();
-        Ok(SaSource::InMemory(sa_i32))
+        return Ok(SaSource::External(stream));
     }
+
+    let mut text_u8 = Vec::with_capacity(text.len());
+    for &sym in text {
+        let b = u8::try_from(sym).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "text symbol out of range for byte-based SA",
+            )
+        })?;
+        text_u8.push(b);
+    }
+
+    // cdivsufsort returns Vec<i32>
+    let (_, sa_i32) = div_sort(&text_u8).into_parts();
+    Ok(SaSource::InMemory(sa_i32))
 }
 
 fn should_use_external_sa(len: usize) -> bool {

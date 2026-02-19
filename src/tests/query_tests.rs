@@ -1,4 +1,5 @@
 use crate::index::builder::ShardBuilder;
+use crate::index::encoding::EncodingMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
 use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
@@ -14,7 +15,15 @@ fn decode_header_from_path(path: &std::path::Path) -> ShardHeader {
 }
 
 fn build_query_engine(text: &[u8], sample_rate: u32) -> QueryEngine {
-    let builder = ShardBuilder::new(sample_rate);
+    build_query_engine_with_mode(text, sample_rate, EncodingMode::Text)
+}
+
+fn build_query_engine_with_mode(
+    text: &[u8],
+    sample_rate: u32,
+    mode: EncodingMode,
+) -> QueryEngine {
+    let builder = ShardBuilder::new_with_mode(sample_rate, mode);
     let tmp_file = NamedTempFile::new().unwrap();
     builder.build(text, tmp_file.path()).unwrap();
 
@@ -23,6 +32,13 @@ fn build_query_engine(text: &[u8], sample_rate: u32) -> QueryEngine {
     let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1));
     let reader = PagedReader::new(tmp_file.path(), 1234, cache).unwrap();
     QueryEngine::new(header, reader)
+}
+
+fn with_sentinel(text: &[u8]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(text.len() + 1);
+    data.extend_from_slice(text);
+    data.push(0);
+    data
 }
 
 fn naive_locations(text: &[u8], pattern: &[u8]) -> Vec<usize> {
@@ -54,7 +70,7 @@ fn naive_count(text: &[u8], pattern: &[u8]) -> usize {
 #[test]
 fn test_search_mississippi() {
     // 1. Build Index
-    let text = b"mississippi\0";
+    let text = b"mississippi";
     let query = build_query_engine(text, 2); // Aggressive sampling (every 2nd)
 
     // 2. Test Count (FM-index backward search over BWT)
@@ -89,8 +105,6 @@ fn test_query_random_text_matches_naive() {
     for _ in 0..len {
         text.push(rng.random_range(1..=8));
     }
-    text.push(0); // sentinel
-
     let query = build_query_engine(&text, 3);
 
     for _ in 0..200 {
@@ -113,7 +127,7 @@ fn test_query_random_text_matches_naive() {
 
 #[test]
 fn test_query_edge_cases() {
-    let text = b"aaaaa\0";
+    let text = b"aaaaa";
     let query = build_query_engine(text, 4);
 
     let mut locs = query.locate(b"a").unwrap();
@@ -129,8 +143,8 @@ fn test_query_edge_cases() {
 
 #[test]
 fn test_query_10mb_file() {
-    let total_len = 10 * 1024 * 1024; // 10MB total, including sentinel
-    let data_len = total_len - 1;
+    let total_len = 10 * 1024 * 1024; // 10MB data
+    let data_len = total_len;
     let base = b"abcd";
 
     let mut text = Vec::with_capacity(total_len);
@@ -154,8 +168,6 @@ fn test_query_10mb_file() {
     text[pos1..pos1 + marker1.len()].copy_from_slice(&marker1);
     text[pos2..pos2 + marker2.len()].copy_from_slice(&marker2);
     text[pos3..pos3 + marker3.len()].copy_from_slice(&marker3);
-
-    text.push(0); // sentinel
 
     let sample_rate = 64;
     let builder = ShardBuilder::new(sample_rate);
@@ -207,8 +219,6 @@ fn test_extract_roundtrip_random() {
     for _ in 0..len {
         text.push(rng.random_range(1..=50));
     }
-    text.push(0); // sentinel
-
     let query = build_query_engine(&text, 7);
 
     for _ in 0..200 {
@@ -223,7 +233,7 @@ fn test_extract_roundtrip_random() {
 
 #[test]
 fn test_extract_end_boundary() {
-    let text = b"abcd\0";
+    let text = b"abcd";
     let query = build_query_engine(text, 2);
 
     let tail = query.extract(4, 1).unwrap();
@@ -232,8 +242,8 @@ fn test_extract_end_boundary() {
     let end_two = query.extract(3, 2).unwrap();
     assert_eq!(end_two, b"d\0");
 
-    let full = query.extract(0, text.len()).unwrap();
-    assert_eq!(full, text);
+    let full = query.extract(0, text.len() + 1).unwrap();
+    assert_eq!(full, with_sentinel(text));
 }
 
 #[test]
@@ -253,7 +263,6 @@ fn test_multi_document_retrieval() {
 
     offsets.push(text.len() as u64);
     text.extend_from_slice(doc3);
-    text.push(0);
 
     let builder = ShardBuilder::new(4);
     let tmp_file = NamedTempFile::new().unwrap();
@@ -279,4 +288,21 @@ fn test_multi_document_retrieval() {
     assert_eq!(retrieved_doc2, doc2);
     let retrieved_doc3 = query.get_document(2).unwrap();
     assert_eq!(retrieved_doc3, doc3);
+}
+
+#[test]
+fn test_binary_mode_roundtrip_and_search() {
+    let data = vec![0u8, 1, 2, 255, 0, 5, 6, 7, 255];
+    let query = build_query_engine_with_mode(&data, 4, EncodingMode::Binary);
+
+    let mut locs = query.locate(&[0, 1]).unwrap();
+    locs.sort();
+    assert_eq!(locs, vec![0]);
+
+    let mut locs_255 = query.locate(&[255]).unwrap();
+    locs_255.sort();
+    assert_eq!(locs_255, vec![3, 8]);
+
+    let extracted = query.extract(0, data.len()).unwrap();
+    assert_eq!(extracted, data);
 }
