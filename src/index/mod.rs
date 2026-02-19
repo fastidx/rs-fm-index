@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod bitpack;
+pub mod external_sa;
 pub mod header;
 pub mod query;
 pub mod sampled_sa;

@@ -283,7 +283,6 @@ impl Orchestrator {
 
                 self.read_into_buffer(&mut file, take, &mut buffer, self.config.read_buffer, &path)?;
 
-                buffer.push(0);
                 doc_offsets.push(segment_start);
 
                 let is_first = part_index == 0;
@@ -334,6 +333,10 @@ impl Orchestrator {
             doc_offsets.clear();
             segments.clear();
             return Ok(());
+        }
+
+        if *buffer.last().unwrap() != 0 {
+            buffer.push(0);
         }
 
         let job = ShardJob {

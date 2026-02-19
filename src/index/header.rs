@@ -46,7 +46,7 @@ mod serde_arrays {
     }
 }
 
-pub const MAGIC_BYTES: u64 = 0x494E_4649_4752_414D; // "INFIGRAM" in hex
+pub const MAGIC_BYTES: u64 = 0x464D_5F49_4E44_4558; // "FM_INDEX" in hex
 pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

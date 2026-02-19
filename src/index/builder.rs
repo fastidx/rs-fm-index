@@ -1,16 +1,26 @@
 use byteorder::{ByteOrder, LittleEndian};
 use cdivsufsort::sort as div_sort; // Using the cdivsufsort crate
+use std::env;
 use std::fs::File;
 use std::io::{self, BufWriter, Cursor, Write};
 use std::path::Path;
 
 use crate::index::bitpack;
+use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
 use crate::index::wavelet::{canonical_codes, huffman_lengths, WaveletTreeBuilder};
 use tempfile::NamedTempFile;
 
 pub struct ShardBuilder {
     sample_rate: u32,
+}
+
+const EXTERNAL_SA_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_EXTERNAL_SA_MEM_BYTES: usize = 256 * 1024 * 1024;
+
+enum SaSource {
+    InMemory(Vec<i32>),
+    External(external_sa::SaStream),
 }
 
 impl ShardBuilder {
@@ -58,23 +68,34 @@ impl ShardBuilder {
             }
             prev = off;
         }
-
-        let mut writer = std::io::BufWriter::new(File::create(output_path)?);
-
-        // 1. Compute Suffix Array (Heavy Computation)
-        // cdivsufsort returns Vec<i32>
-        let (_, sa_i32) = div_sort(text).into_parts();
-
-        // 2. Build BWT + samples using an external-memory pipeline
-        // BWT[i] = Text[SA[i] - 1] (cyclic)
-        // We stream BWT into a temp file and avoid materializing SA/BWT/ISA in memory.
-        let len = text.len();
-        if len == 0 {
+        if text.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "text must be non-empty",
             ));
         }
+        if *text.last().unwrap() != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "text must end with a 0 sentinel",
+            ));
+        }
+        if text[..text.len() - 1].contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "text contains 0 byte before sentinel; separators are no longer supported",
+            ));
+        }
+
+        let mut writer = std::io::BufWriter::new(File::create(output_path)?);
+
+        // 1. Compute Suffix Array (Heavy Computation)
+        let sa_source = build_sa_source(text)?;
+
+        // 2. Build BWT + samples using an external-memory pipeline
+        // BWT[i] = Text[SA[i] - 1] (cyclic)
+        // We stream BWT into a temp file and avoid materializing SA/BWT/ISA in memory.
+        let len = text.len();
 
         let sample_rate = self.sample_rate as usize;
         let sa_len = len.div_ceil(sample_rate);
@@ -89,26 +110,55 @@ impl ShardBuilder {
             let mut writer = BufWriter::new(bwt_file.as_file_mut());
             let mut buffer = Vec::with_capacity(8 * 1024 * 1024);
 
-            for (row_idx, &sa_val) in sa_i32.iter().enumerate() {
-                let pos = sa_val as usize;
+            match sa_source {
+                SaSource::InMemory(ref sa_i32) => {
+                    for (row_idx, &sa_val) in sa_i32.iter().enumerate() {
+                        let pos = sa_val as usize;
 
-                if row_idx % sample_rate == 0 {
-                    sa_samples.push(pos as u64);
-                }
-                if pos % sample_rate == 0 {
-                    let idx = pos / sample_rate;
-                    if idx < isa_samples.len() {
-                        isa_samples[idx] = row_idx as u64;
+                        if row_idx % sample_rate == 0 {
+                            sa_samples.push(pos as u64);
+                        }
+                        if pos % sample_rate == 0 {
+                            let idx = pos / sample_rate;
+                            if idx < isa_samples.len() {
+                                isa_samples[idx] = row_idx as u64;
+                            }
+                        }
+
+                        let bwt_byte = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                        counts[bwt_byte as usize] += 1;
+                        buffer.push(bwt_byte);
+
+                        if buffer.len() >= 8 * 1024 * 1024 {
+                            writer.write_all(&buffer)?;
+                            buffer.clear();
+                        }
                     }
                 }
+                SaSource::External(ref stream) => {
+                    let iter = stream.iter()?;
+                    for (row_idx, sa_val) in iter.enumerate() {
+                        let pos = sa_val? as usize;
 
-                let bwt_byte = if pos == 0 { text[len - 1] } else { text[pos - 1] };
-                counts[bwt_byte as usize] += 1;
-                buffer.push(bwt_byte);
+                        if row_idx % sample_rate == 0 {
+                            sa_samples.push(pos as u64);
+                        }
+                        if pos % sample_rate == 0 {
+                            let idx = pos / sample_rate;
+                            if idx < isa_samples.len() {
+                                isa_samples[idx] = row_idx as u64;
+                            }
+                        }
 
-                if buffer.len() >= 8 * 1024 * 1024 {
-                    writer.write_all(&buffer)?;
-                    buffer.clear();
+                        let bwt_byte = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                        counts[bwt_byte as usize] += 1;
+                        buffer.push(bwt_byte);
+
+                        if buffer.len() >= 8 * 1024 * 1024 {
+                            writer.write_all(&buffer)?;
+                            buffer.clear();
+                        }
+                    }
                 }
             }
 
@@ -329,4 +379,32 @@ impl ShardBuilder {
         writer.flush()?;
         Ok(())
     }
+}
+
+fn build_sa_source(text: &[u8]) -> io::Result<SaSource> {
+    if should_use_external_sa(text.len()) {
+        let mem_limit = external_sa_mem_limit();
+        let stream = external_sa::build_sa_external(text, mem_limit)?;
+        Ok(SaSource::External(stream))
+    } else {
+        // cdivsufsort returns Vec<i32>
+        let (_, sa_i32) = div_sort(text).into_parts();
+        Ok(SaSource::InMemory(sa_i32))
+    }
+}
+
+fn should_use_external_sa(len: usize) -> bool {
+    if let Ok(value) = env::var("FM_INDEX_EXTERNAL_SA") {
+        return value == "1" || value.eq_ignore_ascii_case("true");
+    }
+    len >= EXTERNAL_SA_THRESHOLD_BYTES
+}
+
+fn external_sa_mem_limit() -> usize {
+    if let Ok(value) = env::var("FM_INDEX_EXTERNAL_SA_MEM_BYTES") {
+        if let Ok(parsed) = value.parse::<usize>() {
+            return parsed.max(1);
+        }
+    }
+    DEFAULT_EXTERNAL_SA_MEM_BYTES
 }

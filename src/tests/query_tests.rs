@@ -19,6 +19,7 @@ fn build_query_engine(text: &[u8], sample_rate: u32) -> QueryEngine {
     builder.build(text, tmp_file.path()).unwrap();
 
     let header = decode_header_from_path(tmp_file.path());
+    eprintln!("decoded offsets: {:?}", header.decode_doc_offsets().unwrap());
     let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1));
     let reader = PagedReader::new(tmp_file.path(), 1234, cache).unwrap();
     QueryEngine::new(header, reader)
@@ -239,18 +240,16 @@ fn test_extract_end_boundary() {
 fn test_multi_document_retrieval() {
     let doc1 = b"Hello World";
     let doc2 = b"Rust is fast";
-    let doc3 = b"Infini-gram search";
+    let doc3 = b"FM-index search";
 
     let mut text = Vec::new();
     let mut offsets = Vec::new();
 
     offsets.push(text.len() as u64);
     text.extend_from_slice(doc1);
-    text.push(0);
 
     offsets.push(text.len() as u64);
     text.extend_from_slice(doc2);
-    text.push(0);
 
     offsets.push(text.len() as u64);
     text.extend_from_slice(doc3);

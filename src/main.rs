@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "infigram", version, about = "Infini-gram FM-index CLI")]
+#[command(name = "fm_index", version, about = "FM_INDEX FM-index CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
