@@ -4,12 +4,24 @@ use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use tempfile::tempfile;
 
 // --- Constants ---
 const PAGE_SIZE: usize = 4096;
 const HEADER_SIZE: usize = 8;
 const BITS_PER_PAGE: usize = (PAGE_SIZE - HEADER_SIZE) * 8;
+
+pub(crate) fn paged_wavelet_bytes(total_bits: usize) -> u64 {
+    let payload_size = PAGE_SIZE - HEADER_SIZE;
+    let packed_bytes = total_bits.div_ceil(8);
+    if packed_bytes == 0 {
+        return 0;
+    }
+    let pages = packed_bytes.div_ceil(payload_size);
+    (pages * PAGE_SIZE) as u64
+}
 
 // =================================================================================
 //  Storage Engine: Paged BitVector
@@ -222,6 +234,78 @@ enum BuilderNode {
     Internal { left: usize, right: usize },
 }
 
+pub(crate) struct WaveletStreamPlan {
+    nodes: Vec<BuilderNode>,
+    tree_shape: Vec<WaveletNodeShape>,
+    bit_lens: Vec<usize>,
+    total_bits: usize,
+}
+
+impl WaveletStreamPlan {
+    pub(crate) fn tree_shape(&self) -> &[WaveletNodeShape] {
+        &self.tree_shape
+    }
+
+    pub(crate) fn total_bits(&self) -> usize {
+        self.total_bits
+    }
+}
+
+pub(crate) fn plan_wavelet_stream(
+    codes: &[Option<HuffmanCode>; ALPHABET_SIZE],
+    counts: &[u64; ALPHABET_SIZE],
+) -> WaveletStreamPlan {
+    let nodes = build_nodes(codes);
+    let mut bit_lens = vec![0usize; nodes.len()];
+
+    for (sym, code_opt) in codes.iter().enumerate() {
+        let Some(code) = code_opt else { continue };
+        let freq = counts[sym] as usize;
+        if freq == 0 {
+            continue;
+        }
+
+        let mut curr = 0usize;
+        for depth in (0..code.len).rev() {
+            bit_lens[curr] = bit_lens[curr].saturating_add(freq);
+            let bit = (code.bits >> depth) & 1;
+            match nodes[curr] {
+                BuilderNode::Internal { left, right } => {
+                    curr = if bit == 0 { left } else { right };
+                }
+                BuilderNode::Leaf(_) => break,
+            }
+        }
+    }
+
+    let mut tree_shape = Vec::with_capacity(nodes.len());
+    let mut cursor = 0usize;
+    for (i, node) in nodes.iter().enumerate() {
+        match node {
+            BuilderNode::Leaf(sym) => {
+                tree_shape.push(WaveletNodeShape::Leaf { symbol: *sym });
+            }
+            BuilderNode::Internal { left, right } => {
+                let bit_len = bit_lens[i];
+                tree_shape.push(WaveletNodeShape::Internal {
+                    left_idx: *left,
+                    right_idx: *right,
+                    bit_start: cursor,
+                    bit_len,
+                });
+                cursor += bit_len;
+            }
+        }
+    }
+
+    WaveletStreamPlan {
+        nodes,
+        tree_shape,
+        bit_lens,
+        total_bits: cursor,
+    }
+}
+
 pub struct WaveletTreeBuilder {
     pub codes: [Option<HuffmanCode>; ALPHABET_SIZE],
     node_bits: Vec<Vec<bool>>,
@@ -234,7 +318,7 @@ impl WaveletTreeBuilder {
         let lens = huffman_lengths(&freq);
         let codes = canonical_codes(&lens);
 
-        let nodes = Self::build_nodes(&codes);
+        let nodes = build_nodes(&codes);
         let node_count = nodes.len();
         Self {
             codes,
@@ -244,7 +328,7 @@ impl WaveletTreeBuilder {
     }
 
     pub fn from_codes(codes: [Option<HuffmanCode>; ALPHABET_SIZE]) -> Self {
-        let nodes = Self::build_nodes(&codes);
+        let nodes = build_nodes(&codes);
         let node_count = nodes.len();
         Self {
             codes,
@@ -295,52 +379,7 @@ impl WaveletTreeBuilder {
         Ok(())
     }
 
-    fn build_nodes(codes: &[Option<HuffmanCode>; ALPHABET_SIZE]) -> Vec<BuilderNode> {
-        let mut nodes = vec![BuilderNode::Internal { left: 0, right: 0 }];
-
-        for (sym, code) in codes.iter().enumerate() {
-            if let Some(code) = code {
-                let mut curr_idx = 0;
-                // MSB first for traversal
-                for depth in (0..code.len).rev() {
-                    let bit = (code.bits >> depth) & 1;
-
-                    let next_child_idx = match nodes[curr_idx] {
-                        BuilderNode::Internal { left, right } => {
-                            if bit == 0 {
-                                left
-                            } else {
-                                right
-                            }
-                        }
-                        BuilderNode::Leaf(_) => panic!("Invalid prefix code: path collision"),
-                    };
-
-                    if next_child_idx == 0 {
-                        let new_node_idx = nodes.len();
-                        nodes.push(BuilderNode::Internal { left: 0, right: 0 });
-
-                        match &mut nodes[curr_idx] {
-                            BuilderNode::Internal { left, right } => {
-                                if bit == 0 {
-                                    *left = new_node_idx;
-                                } else {
-                                    *right = new_node_idx;
-                                }
-                            }
-                            _ => unreachable!(),
-                        }
-                        curr_idx = new_node_idx;
-                    } else {
-                        curr_idx = next_child_idx;
-                    }
-                }
-                nodes[curr_idx] = BuilderNode::Leaf(sym as u16);
-            }
-        }
-
-        nodes
-    }
+    // build_nodes now lives at module scope
 
     fn process_symbol(&mut self, symbol: u16) {
         let idx = symbol as usize;
@@ -436,6 +475,317 @@ impl WaveletTreeBuilder {
 
         Ok((start_pos, shape_map))
     }
+}
+
+fn build_nodes(codes: &[Option<HuffmanCode>; ALPHABET_SIZE]) -> Vec<BuilderNode> {
+    let mut nodes = vec![BuilderNode::Internal { left: 0, right: 0 }];
+
+    for (sym, code) in codes.iter().enumerate() {
+        if let Some(code) = code {
+            let mut curr_idx = 0;
+            // MSB first for traversal
+            for depth in (0..code.len).rev() {
+                let bit = (code.bits >> depth) & 1;
+
+                let next_child_idx = match nodes[curr_idx] {
+                    BuilderNode::Internal { left, right } => {
+                        if bit == 0 { left } else { right }
+                    }
+                    BuilderNode::Leaf(_) => panic!("Invalid prefix code: path collision"),
+                };
+
+                if next_child_idx == 0 {
+                    let new_node_idx = nodes.len();
+                    nodes.push(BuilderNode::Internal { left: 0, right: 0 });
+
+                    match &mut nodes[curr_idx] {
+                        BuilderNode::Internal { left, right } => {
+                            if bit == 0 {
+                                *left = new_node_idx;
+                            } else {
+                                *right = new_node_idx;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    curr_idx = new_node_idx;
+                } else {
+                    curr_idx = next_child_idx;
+                }
+            }
+            nodes[curr_idx] = BuilderNode::Leaf(sym as u16);
+        }
+    }
+
+    nodes
+}
+
+struct NodeBitWriter {
+    writer: BufWriter<File>,
+    current_byte: u8,
+    bit_in_byte: u8,
+    bits_written: usize,
+}
+
+impl NodeBitWriter {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            writer: BufWriter::new(tempfile()?),
+            current_byte: 0,
+            bit_in_byte: 0,
+            bits_written: 0,
+        })
+    }
+
+    fn push_bit(&mut self, bit: bool) -> io::Result<()> {
+        if bit {
+            self.current_byte |= 1 << self.bit_in_byte;
+        }
+        self.bit_in_byte += 1;
+        self.bits_written += 1;
+        if self.bit_in_byte == 8 {
+            self.writer.write_all(&[self.current_byte])?;
+            self.current_byte = 0;
+            self.bit_in_byte = 0;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<NodeBitFile> {
+        if self.bit_in_byte > 0 {
+            self.writer.write_all(&[self.current_byte])?;
+            self.current_byte = 0;
+            self.bit_in_byte = 0;
+        }
+        self.writer.flush()?;
+        let mut file = self.writer.into_inner()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(NodeBitFile { file })
+    }
+}
+
+struct NodeBitFile {
+    file: File,
+}
+
+struct NodeBitReader {
+    reader: BufReader<File>,
+    current_byte: u8,
+    bit_in_byte: u8,
+    bits_remaining: usize,
+}
+
+impl NodeBitReader {
+    fn new(file: File, bits_remaining: usize) -> Self {
+        Self {
+            reader: BufReader::new(file),
+            current_byte: 0,
+            bit_in_byte: 8,
+            bits_remaining,
+        }
+    }
+
+    fn next_bit(&mut self) -> io::Result<Option<bool>> {
+        if self.bits_remaining == 0 {
+            return Ok(None);
+        }
+        if self.bit_in_byte >= 8 {
+            let mut buf = [0u8; 1];
+            self.reader.read_exact(&mut buf)?;
+            self.current_byte = buf[0];
+            self.bit_in_byte = 0;
+        }
+        let bit = (self.current_byte >> self.bit_in_byte) & 1 == 1;
+        self.bit_in_byte += 1;
+        self.bits_remaining -= 1;
+        Ok(Some(bit))
+    }
+}
+
+struct PagedBitWriter<W: Write> {
+    writer: W,
+    payload_size: usize,
+    page_buf: Vec<u8>,
+    current_byte: u8,
+    bit_in_byte: u8,
+    page_ones: u64,
+    base_rank: u64,
+}
+
+impl<W: Write> PagedBitWriter<W> {
+    fn new(writer: W) -> Self {
+        let payload_size = PAGE_SIZE - HEADER_SIZE;
+        Self {
+            writer,
+            payload_size,
+            page_buf: Vec::with_capacity(payload_size),
+            current_byte: 0,
+            bit_in_byte: 0,
+            page_ones: 0,
+            base_rank: 0,
+        }
+    }
+
+    fn push_bit(&mut self, bit: bool) -> io::Result<()> {
+        if bit {
+            self.current_byte |= 1 << self.bit_in_byte;
+        }
+        self.bit_in_byte += 1;
+        if self.bit_in_byte == 8 {
+            self.flush_byte()?;
+        }
+        Ok(())
+    }
+
+    fn flush_byte(&mut self) -> io::Result<()> {
+        let byte = self.current_byte;
+        self.current_byte = 0;
+        self.bit_in_byte = 0;
+        self.page_buf.push(byte);
+        self.page_ones += byte.count_ones() as u64;
+        if self.page_buf.len() == self.payload_size {
+            self.flush_page()?;
+        }
+        Ok(())
+    }
+
+    fn flush_page(&mut self) -> io::Result<()> {
+        self.writer.write_u64::<LittleEndian>(self.base_rank)?;
+        self.writer.write_all(&self.page_buf)?;
+        if self.page_buf.len() < self.payload_size {
+            let pad = self.payload_size - self.page_buf.len();
+            self.writer.write_all(&vec![0u8; pad])?;
+        }
+        self.base_rank = self.base_rank.saturating_add(self.page_ones);
+        self.page_buf.clear();
+        self.page_ones = 0;
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        if self.bit_in_byte > 0 {
+            self.flush_byte()?;
+        }
+        if !self.page_buf.is_empty() {
+            self.flush_page()?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn write_wavelet_stream_from_bwt<R: Read, W: Write>(
+    mut reader: R,
+    codes: &[Option<HuffmanCode>; ALPHABET_SIZE],
+    plan: &WaveletStreamPlan,
+    writer: &mut W,
+) -> io::Result<()> {
+    let mut node_writers: Vec<Option<NodeBitWriter>> = Vec::with_capacity(plan.nodes.len());
+    for node in &plan.nodes {
+        match node {
+            BuilderNode::Internal { .. } => node_writers.push(Some(NodeBitWriter::new()?)),
+            BuilderNode::Leaf(_) => node_writers.push(None),
+        }
+    }
+
+    let mut bits_written = vec![0usize; plan.nodes.len()];
+
+    let mut emit_symbol = |symbol: u16| -> io::Result<()> {
+        let idx = symbol as usize;
+        if idx >= ALPHABET_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "symbol out of range for wavelet codes",
+            ));
+        }
+        let code = codes[idx].ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing code for symbol in wavelet stream",
+            )
+        })?;
+        let mut curr = 0usize;
+        for depth in (0..code.len).rev() {
+            let bit = (code.bits >> depth) & 1;
+            if let Some(writer) = node_writers[curr].as_mut() {
+                writer.push_bit(bit == 1)?;
+                bits_written[curr] = bits_written[curr].saturating_add(1);
+            }
+            match plan.nodes[curr] {
+                BuilderNode::Internal { left, right } => {
+                    curr = if bit == 0 { left } else { right };
+                }
+                BuilderNode::Leaf(_) => break,
+            }
+        }
+        Ok(())
+    };
+
+    let mut buf = [0u8; 8192];
+    let mut carry: Option<u8> = None;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let mut i = 0usize;
+        if let Some(prev) = carry.take() {
+            if i >= n {
+                carry = Some(prev);
+                break;
+            }
+            let sym = u16::from_le_bytes([prev, buf[i]]);
+            emit_symbol(sym)?;
+            i += 1;
+        }
+        while i + 1 < n {
+            let sym = u16::from_le_bytes([buf[i], buf[i + 1]]);
+            emit_symbol(sym)?;
+            i += 2;
+        }
+        if i < n {
+            carry = Some(buf[i]);
+        }
+    }
+    if carry.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "trailing byte in u16 BWT stream",
+        ));
+    }
+
+    let mut node_files: Vec<Option<NodeBitFile>> = Vec::with_capacity(plan.nodes.len());
+    for (idx, writer_opt) in node_writers.into_iter().enumerate() {
+        if let Some(writer) = writer_opt {
+            if bits_written[idx] != plan.bit_lens[idx] {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "wavelet bit count mismatch while streaming",
+                ));
+            }
+            let file = writer.finish()?;
+            node_files.push(Some(file));
+        } else {
+            node_files.push(None);
+        }
+    }
+
+    let mut paged_writer = PagedBitWriter::new(writer);
+    for (idx, node) in plan.nodes.iter().enumerate() {
+        if let BuilderNode::Internal { .. } = node {
+            let bit_len = plan.bit_lens[idx];
+            if bit_len == 0 {
+                continue;
+            }
+            let file = node_files[idx]
+                .take()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing node file"))?;
+            let mut reader = NodeBitReader::new(file.file, bit_len);
+            while let Some(bit) = reader.next_bit()? {
+                paged_writer.push_bit(bit)?;
+            }
+        }
+    }
+    paged_writer.finish()
 }
 
 // =================================================================================

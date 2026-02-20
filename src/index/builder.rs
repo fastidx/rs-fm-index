@@ -2,14 +2,17 @@ use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use cdivsufsort::sort as div_sort; // Using the cdivsufsort crate
 use std::env;
 use std::fs::File;
-use std::io::{self, BufWriter, Cursor, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use crate::index::bitpack;
 use crate::index::encoding::{strategy_for, EncodingMode, ALPHABET_SIZE, SENTINEL};
 use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
-use crate::index::wavelet::{canonical_codes, huffman_lengths, WaveletTreeBuilder};
+use crate::index::wavelet::{
+    canonical_codes, huffman_lengths, paged_wavelet_bytes, plan_wavelet_stream,
+    write_wavelet_stream_from_bwt,
+};
 use tempfile::NamedTempFile;
 
 pub struct ShardBuilder {
@@ -218,19 +221,12 @@ impl ShardBuilder {
             sum += counts[i];
         }
 
-        // 4. Initialize Wavelet Tree Builder from BWT stream
+        // 4. Plan Wavelet Tree layout from BWT counts (streaming build)
         let lens = huffman_lengths(&counts);
         let codes = canonical_codes(&lens);
-        let mut wt_builder = WaveletTreeBuilder::from_codes(codes);
-
-        let bwt_read = bwt_file.reopen()?;
-        let mut bwt_reader = std::io::BufReader::new(bwt_read);
-        wt_builder.process_reader_u16(&mut bwt_reader)?;
-
-        // 5. Write Wavelet Tree to a buffer first so we can size the header correctly
-        let mut wt_buf = Cursor::new(Vec::new());
-        let (_wt_offset, tree_shape) = wt_builder.write_to_file(&mut wt_buf)?;
-        let wt_bytes = wt_buf.into_inner();
+        let stream_plan = plan_wavelet_stream(&codes, &counts);
+        let tree_shape = stream_plan.tree_shape().to_vec();
+        let wavelet_bytes = paged_wavelet_bytes(stream_plan.total_bits());
 
         let can_pack_u32 = len <= u32::MAX as usize;
 
@@ -349,7 +345,7 @@ impl ShardBuilder {
 
         header.tree_shape = tree_shape;
         header.wt_start_offset = header_size;
-        header.sa_start_offset = header_size + wt_bytes.len() as u64;
+        header.sa_start_offset = header_size + wavelet_bytes;
         header.isa_start_offset = header.sa_start_offset + sa_bytes_len;
 
         let final_header_bytes = bincode::serde::encode_to_vec(&header, config)
@@ -361,9 +357,11 @@ impl ShardBuilder {
             ));
         }
 
-        // 6. Write Header + Wavelet Tree
+        // 6. Write Header + Wavelet Tree (streamed)
         writer.write_all(&final_header_bytes)?;
-        writer.write_all(&wt_bytes)?;
+        let bwt_read = bwt_file.reopen()?;
+        let bwt_reader = std::io::BufReader::new(bwt_read);
+        write_wavelet_stream_from_bwt(bwt_reader, &codes, &stream_plan, &mut writer)?;
 
         // 7. Write Sampled Suffix Array (SA)
         if sa_bits == 0 {
