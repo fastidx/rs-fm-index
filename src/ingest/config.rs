@@ -12,6 +12,8 @@ pub struct IngestConfigFile {
     pub num_workers: Option<usize>,
     pub sample_rate: Option<u32>,
     pub binary_mode: Option<bool>,
+    pub wavelet_mode: Option<String>,
+    pub wavelet_max_bytes: Option<SizeValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

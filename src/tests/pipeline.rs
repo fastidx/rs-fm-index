@@ -291,6 +291,7 @@ fn test_orchestrator_chunking() {
         num_workers: 2,
         sample_rate: 4,
         encoding_mode: EncodingMode::Text,
+        wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 
     let orch = Orchestrator::new(config);
@@ -341,6 +342,7 @@ fn test_orchestrator_oversized_split_metadata() {
         num_workers: 2,
         sample_rate: 4,
         encoding_mode: EncodingMode::Text,
+        wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 
     let orch = Orchestrator::new(config);

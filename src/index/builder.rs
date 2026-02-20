@@ -10,14 +10,14 @@ use crate::index::encoding::{strategy_for, EncodingMode, ALPHABET_SIZE, SENTINEL
 use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
 use crate::index::wavelet::{
-    canonical_codes, huffman_lengths, paged_wavelet_bytes, plan_wavelet_stream,
-    write_wavelet_stream_from_bwt,
+    canonical_codes, huffman_lengths, make_wavelet_build_strategy, WaveletBuildMode,
 };
 use tempfile::NamedTempFile;
 
 pub struct ShardBuilder {
     sample_rate: u32,
     encoding_mode: EncodingMode,
+    wavelet_mode: WaveletBuildMode,
 }
 
 const EXTERNAL_SA_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
@@ -33,6 +33,7 @@ impl ShardBuilder {
         Self {
             sample_rate,
             encoding_mode: EncodingMode::Text,
+            wavelet_mode: WaveletBuildMode::default(),
         }
     }
 
@@ -40,6 +41,19 @@ impl ShardBuilder {
         Self {
             sample_rate,
             encoding_mode,
+            wavelet_mode: WaveletBuildMode::default(),
+        }
+    }
+
+    pub fn new_with_modes(
+        sample_rate: u32,
+        encoding_mode: EncodingMode,
+        wavelet_mode: WaveletBuildMode,
+    ) -> Self {
+        Self {
+            sample_rate,
+            encoding_mode,
+            wavelet_mode,
         }
     }
 
@@ -221,12 +235,14 @@ impl ShardBuilder {
             sum += counts[i];
         }
 
-        // 4. Plan Wavelet Tree layout from BWT counts (streaming build)
+        // 4. Build Wavelet Tree using selected strategy
         let lens = huffman_lengths(&counts);
         let codes = canonical_codes(&lens);
-        let stream_plan = plan_wavelet_stream(&codes, &counts);
-        let tree_shape = stream_plan.tree_shape().to_vec();
-        let wavelet_bytes = paged_wavelet_bytes(stream_plan.total_bits());
+        let codes_for_header = codes;
+        let wavelet_strategy =
+            make_wavelet_build_strategy(self.wavelet_mode, codes, &counts, &bwt_file)?;
+        let tree_shape = wavelet_strategy.tree_shape().to_vec();
+        let wavelet_bytes = wavelet_strategy.wavelet_bytes();
 
         let can_pack_u32 = len <= u32::MAX as usize;
 
@@ -304,7 +320,7 @@ impl ShardBuilder {
             sa_bits,
             isa_bits,
             c_table,
-            codes,
+            codes: codes_for_header,
             tree_shape: tree_shape.clone(),
             doc_offsets,
         });
@@ -357,11 +373,9 @@ impl ShardBuilder {
             ));
         }
 
-        // 6. Write Header + Wavelet Tree (streamed)
+        // 6. Write Header + Wavelet Tree
         writer.write_all(&final_header_bytes)?;
-        let bwt_read = bwt_file.reopen()?;
-        let bwt_reader = std::io::BufReader::new(bwt_read);
-        write_wavelet_stream_from_bwt(bwt_reader, &codes, &stream_plan, &mut writer)?;
+        wavelet_strategy.write_to(&bwt_file, &mut writer)?;
 
         // 7. Write Sampled Suffix Array (SA)
         if sa_bits == 0 {

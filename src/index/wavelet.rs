@@ -5,13 +5,30 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use tempfile::tempfile;
+use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use tempfile::{tempfile, NamedTempFile};
 
 // --- Constants ---
 const PAGE_SIZE: usize = 4096;
 const HEADER_SIZE: usize = 8;
 const BITS_PER_PAGE: usize = (PAGE_SIZE - HEADER_SIZE) * 8;
+
+pub const DEFAULT_WAVELET_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveletBuildMode {
+    InMemory,
+    Streaming,
+    Auto { max_bytes: usize },
+}
+
+impl Default for WaveletBuildMode {
+    fn default() -> Self {
+        Self::Auto {
+            max_bytes: DEFAULT_WAVELET_MAX_BYTES,
+        }
+    }
+}
 
 pub(crate) fn paged_wavelet_bytes(total_bits: usize) -> u64 {
     let payload_size = PAGE_SIZE - HEADER_SIZE;
@@ -21,6 +38,12 @@ pub(crate) fn paged_wavelet_bytes(total_bits: usize) -> u64 {
     }
     let pages = packed_bytes.div_ceil(payload_size);
     (pages * PAGE_SIZE) as u64
+}
+
+pub(crate) trait WaveletBuildStrategy {
+    fn tree_shape(&self) -> &[WaveletNodeShape];
+    fn wavelet_bytes(&self) -> u64;
+    fn write_to(&self, bwt_file: &NamedTempFile, writer: &mut dyn Write) -> io::Result<()>;
 }
 
 // =================================================================================
@@ -133,7 +156,8 @@ fn count_freq(data: &[u16]) -> [u64; ALPHABET_SIZE] {
     f
 }
 
-pub(crate) fn huffman_lengths(freq: &[u64; ALPHABET_SIZE]) -> [u8; ALPHABET_SIZE] {
+#[doc(hidden)]
+pub fn huffman_lengths(freq: &[u64; ALPHABET_SIZE]) -> [u8; ALPHABET_SIZE] {
     let mut heap = BinaryHeap::new();
     let mut nodes = Vec::new();
 
@@ -234,7 +258,8 @@ enum BuilderNode {
     Internal { left: usize, right: usize },
 }
 
-pub(crate) struct WaveletStreamPlan {
+#[doc(hidden)]
+pub struct WaveletStreamPlan {
     nodes: Vec<BuilderNode>,
     tree_shape: Vec<WaveletNodeShape>,
     bit_lens: Vec<usize>,
@@ -242,16 +267,19 @@ pub(crate) struct WaveletStreamPlan {
 }
 
 impl WaveletStreamPlan {
-    pub(crate) fn tree_shape(&self) -> &[WaveletNodeShape] {
+    #[doc(hidden)]
+    pub fn tree_shape(&self) -> &[WaveletNodeShape] {
         &self.tree_shape
     }
 
-    pub(crate) fn total_bits(&self) -> usize {
+    #[doc(hidden)]
+    pub fn total_bits(&self) -> usize {
         self.total_bits
     }
 }
 
-pub(crate) fn plan_wavelet_stream(
+#[doc(hidden)]
+pub fn plan_wavelet_stream(
     codes: &[Option<HuffmanCode>; ALPHABET_SIZE],
     counts: &[u64; ALPHABET_SIZE],
 ) -> WaveletStreamPlan {
@@ -564,6 +592,100 @@ impl NodeBitWriter {
     }
 }
 
+struct InMemoryWaveletBuild {
+    tree_shape: Vec<WaveletNodeShape>,
+    bytes: Vec<u8>,
+}
+
+impl InMemoryWaveletBuild {
+    fn build(
+        bwt_file: &NamedTempFile,
+        codes: [Option<HuffmanCode>; ALPHABET_SIZE],
+    ) -> io::Result<Self> {
+        let mut wt_builder = WaveletTreeBuilder::from_codes(codes);
+        let bwt_read = bwt_file.reopen()?;
+        let mut bwt_reader = BufReader::new(bwt_read);
+        wt_builder.process_reader_u16(&mut bwt_reader)?;
+
+        let mut wt_buf = Cursor::new(Vec::new());
+        let (_offset, tree_shape) = wt_builder.write_to_file(&mut wt_buf)?;
+        let bytes = wt_buf.into_inner();
+        Ok(Self { tree_shape, bytes })
+    }
+}
+
+impl WaveletBuildStrategy for InMemoryWaveletBuild {
+    fn tree_shape(&self) -> &[WaveletNodeShape] {
+        &self.tree_shape
+    }
+
+    fn wavelet_bytes(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn write_to(&self, _bwt_file: &NamedTempFile, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(&self.bytes)
+    }
+}
+
+struct StreamingWaveletBuild {
+    tree_shape: Vec<WaveletNodeShape>,
+    codes: [Option<HuffmanCode>; ALPHABET_SIZE],
+    plan: WaveletStreamPlan,
+    wavelet_bytes: u64,
+}
+
+impl WaveletBuildStrategy for StreamingWaveletBuild {
+    fn tree_shape(&self) -> &[WaveletNodeShape] {
+        &self.tree_shape
+    }
+
+    fn wavelet_bytes(&self) -> u64 {
+        self.wavelet_bytes
+    }
+
+    fn write_to(&self, bwt_file: &NamedTempFile, writer: &mut dyn Write) -> io::Result<()> {
+        let bwt_read = bwt_file.reopen()?;
+        let bwt_reader = BufReader::new(bwt_read);
+        write_wavelet_stream_from_bwt(bwt_reader, &self.codes, &self.plan, writer)
+    }
+}
+
+pub(crate) fn make_wavelet_build_strategy(
+    mode: WaveletBuildMode,
+    codes: [Option<HuffmanCode>; ALPHABET_SIZE],
+    counts: &[u64; ALPHABET_SIZE],
+    bwt_file: &NamedTempFile,
+) -> io::Result<Box<dyn WaveletBuildStrategy>> {
+    let plan = plan_wavelet_stream(&codes, counts);
+    let total_bits = plan.total_bits();
+    let resolved = match mode {
+        WaveletBuildMode::Auto { max_bytes } => {
+            if total_bits > max_bytes {
+                WaveletBuildMode::Streaming
+            } else {
+                WaveletBuildMode::InMemory
+            }
+        }
+        other => other,
+    };
+
+    match resolved {
+        WaveletBuildMode::InMemory => Ok(Box::new(InMemoryWaveletBuild::build(bwt_file, codes)?)),
+        WaveletBuildMode::Streaming => {
+            let tree_shape = plan.tree_shape().to_vec();
+            let wavelet_bytes = paged_wavelet_bytes(total_bits);
+            Ok(Box::new(StreamingWaveletBuild {
+                tree_shape,
+                codes,
+                plan,
+                wavelet_bytes,
+            }))
+        }
+        WaveletBuildMode::Auto { .. } => unreachable!(),
+    }
+}
+
 struct NodeBitFile {
     file: File,
 }
@@ -602,8 +724,8 @@ impl NodeBitReader {
     }
 }
 
-struct PagedBitWriter<W: Write> {
-    writer: W,
+struct PagedBitWriter<'a> {
+    writer: &'a mut dyn Write,
     payload_size: usize,
     page_buf: Vec<u8>,
     current_byte: u8,
@@ -612,8 +734,8 @@ struct PagedBitWriter<W: Write> {
     base_rank: u64,
 }
 
-impl<W: Write> PagedBitWriter<W> {
-    fn new(writer: W) -> Self {
+impl<'a> PagedBitWriter<'a> {
+    fn new(writer: &'a mut dyn Write) -> Self {
         let payload_size = PAGE_SIZE - HEADER_SIZE;
         Self {
             writer,
@@ -673,11 +795,12 @@ impl<W: Write> PagedBitWriter<W> {
     }
 }
 
-pub(crate) fn write_wavelet_stream_from_bwt<R: Read, W: Write>(
+#[doc(hidden)]
+pub fn write_wavelet_stream_from_bwt<R: Read>(
     mut reader: R,
     codes: &[Option<HuffmanCode>; ALPHABET_SIZE],
     plan: &WaveletStreamPlan,
-    writer: &mut W,
+    writer: &mut dyn Write,
 ) -> io::Result<()> {
     let mut node_writers: Vec<Option<NodeBitWriter>> = Vec::with_capacity(plan.nodes.len());
     for node in &plan.nodes {

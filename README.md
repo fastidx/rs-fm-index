@@ -105,6 +105,19 @@ Extract a document from shards:
 cargo run --release -- doc ./shards 2 > doc3.txt
 ```
 
+Wavelet build mode:
+
+```
+# auto (default) with 256MiB threshold
+cargo run --release -- build --wavelet-mode auto --wavelet-max-bytes 256MiB ./input.txt ./index.idx
+
+# force in-memory build
+cargo run --release -- build --wavelet-mode in-memory ./input.txt ./index.idx
+
+# force streaming build
+cargo run --release -- build --wavelet-mode streaming ./input.txt ./index.idx
+```
+
 ---
 
 ## Library Usage
@@ -202,6 +215,11 @@ global offsets to document IDs.
 - **Sample rate** controls SA/ISA sampling density.
   - Lower = faster locate/extract, larger index.
   - Higher = smaller index, more LF steps.
+
+- **Wavelet build mode** controls how the wavelet bitvectors are built:
+  - `in-memory`: fastest, but uses more RAM.
+  - `streaming`: lowest RAM, slower.
+  - `auto` (default): uses `in-memory` if the plan fits under 256MiB, otherwise `streaming`.
 
 - **Cache size** can be customized with:
   ```rust

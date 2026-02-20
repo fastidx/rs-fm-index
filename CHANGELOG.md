@@ -9,6 +9,7 @@
 - Shared cache support for multi-shard readers.
 - Streaming wavelet-tree build from a BWT reader (no in-memory BWT).
 - Binary-safe encoding mode (b+1 remap) with header flag and CLI `--binary`.
+- Wavelet build strategy selection (`in-memory`, `streaming`, `auto`) with 256MiB default threshold and CLI flags.
 
 ### Changed
 
@@ -17,6 +18,7 @@
 - Builder now streams BWT to disk and samples SA/ISA on the fly (no full BWT/SA/ISA in memory).
 - Enforced a single trailing `0` sentinel with no internal `0` bytes; multi-doc boundaries use doc offsets only.
 - Index format updated for binary mode (wavelet leaf symbols widened); older indexes must be rebuilt.
+- Wavelet build now supports an auto/hybrid mode that selects streaming when the plan exceeds the memory threshold.
 
 ## [0.0.1] - 2026-02-17
 

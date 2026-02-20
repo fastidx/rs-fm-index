@@ -1,5 +1,6 @@
 use crate::index::builder::ShardBuilder;
 use crate::index::encoding::EncodingMode;
+use crate::index::wavelet::WaveletBuildMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
 use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
@@ -13,6 +14,7 @@ use std::sync::Arc;
 pub struct IndexBuilder {
     sample_rate: u32,
     encoding_mode: EncodingMode,
+    wavelet_mode: WaveletBuildMode,
 }
 
 impl IndexBuilder {
@@ -20,11 +22,17 @@ impl IndexBuilder {
         Self {
             sample_rate,
             encoding_mode: EncodingMode::Text,
+            wavelet_mode: WaveletBuildMode::default(),
         }
     }
 
     pub fn with_encoding_mode(mut self, encoding_mode: EncodingMode) -> Self {
         self.encoding_mode = encoding_mode;
+        self
+    }
+
+    pub fn with_wavelet_mode(mut self, wavelet_mode: WaveletBuildMode) -> Self {
+        self.wavelet_mode = wavelet_mode;
         self
     }
 
@@ -35,7 +43,8 @@ impl IndexBuilder {
         text: &[u8],
         output_path: P,
     ) -> io::Result<()> {
-        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
         builder.build_with_offsets(text, vec![0], output_path)
     }
 
@@ -62,7 +71,8 @@ impl IndexBuilder {
             text.extend_from_slice(doc);
         }
 
-        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
         builder.build_with_offsets(&text, offsets, output_path)
     }
 
@@ -97,7 +107,8 @@ impl IndexBuilder {
         output_path: P,
     ) -> io::Result<()> {
         validate_doc_offsets(text.len(), doc_offsets)?;
-        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
         builder.build_with_offsets(text, doc_offsets.to_vec(), output_path)
     }
 }

@@ -117,6 +117,16 @@ let builder = IndexBuilder::new(32);
 builder.build_single_document(b"hello world", "index.idx")?;
 ```
 
+### Wavelet build mode
+
+```rust
+use rust_fm_index::{IndexBuilder, WaveletBuildMode};
+
+let builder = IndexBuilder::new(32)
+    .with_wavelet_mode(WaveletBuildMode::Auto { max_bytes: 256 * 1024 * 1024 });
+builder.build_single_document(b"hello world", "index.idx")?;
+```
+
 ### Build a multi-doc index
 
 ```rust
