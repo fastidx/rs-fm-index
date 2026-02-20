@@ -10,6 +10,7 @@
 - Streaming wavelet-tree build from a BWT reader (no in-memory BWT).
 - Binary-safe encoding mode (b+1 remap) with header flag and CLI `--binary`.
 - Wavelet build strategy selection (`in-memory`, `streaming`, `auto`) with 256MiB default threshold and CLI flags.
+- Document-boundary-safe query flag (`--doc-safe`) with safe count/locate helpers.
 
 ### Changed
 

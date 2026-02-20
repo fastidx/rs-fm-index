@@ -291,6 +291,36 @@ fn test_multi_document_retrieval() {
 }
 
 #[test]
+fn test_doc_safe_filters_cross_boundary() {
+    let doc1 = b"abc";
+    let doc2 = b"def";
+
+    let mut text = Vec::new();
+    let mut offsets = Vec::new();
+    offsets.push(text.len() as u64);
+    text.extend_from_slice(doc1);
+    offsets.push(text.len() as u64);
+    text.extend_from_slice(doc2);
+
+    let builder = ShardBuilder::new(2);
+    let tmp_file = NamedTempFile::new().unwrap();
+    builder
+        .build_with_offsets(&text, offsets.clone(), tmp_file.path())
+        .unwrap();
+
+    let header = decode_header_from_path(tmp_file.path());
+    let cache = Arc::new(GlobalPageCache::new(1024 * 1024, 1));
+    let reader = PagedReader::new(tmp_file.path(), 9999, cache).unwrap();
+    let query = QueryEngine::new(header, reader);
+
+    let locs = query.locate(b"cde").unwrap();
+    assert_eq!(locs, vec![2]);
+
+    let doc_safe = query.locate_doc_safe(b"cde").unwrap();
+    assert!(doc_safe.is_empty());
+}
+
+#[test]
 fn test_binary_mode_roundtrip_and_search() {
     let data = vec![0u8, 1, 2, 255, 0, 5, 6, 7, 255];
     let query = build_query_engine_with_mode(&data, 4, EncodingMode::Binary);

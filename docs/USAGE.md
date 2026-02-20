@@ -92,6 +92,13 @@ Query a shard directory:
 cargo run --release -- query ./shards "search"
 ```
 
+Doc-safe query (prevents cross-doc matches):
+
+```
+cargo run --release -- query --doc-safe ./index.idx "search"
+cargo run --release -- query --doc-safe ./shards "search"
+```
+
 Extract a full document:
 
 ```
@@ -127,6 +134,36 @@ let builder = IndexBuilder::new(32)
 builder.build_single_document(b"hello world", "index.idx")?;
 ```
 
+### Doc-safe queries
+
+```rust
+use rust_fm_index::IndexReader;
+
+let reader = IndexReader::open("index.idx")?;
+let safe_count = reader.count_doc_safe(b"doc")?;
+let safe_locs = reader.locate_doc_safe(b"doc")?;
+```
+
+### Query across shards (library)
+
+```rust
+use rust_fm_index::MultiShardReader;
+
+let reader = MultiShardReader::open("./shards")?;
+
+let total = reader.count(b"search")?;
+let safe_total = reader.count_doc_safe(b"search")?;
+
+let hits = reader.locate(b"search")?;
+let safe_hits = reader.locate_doc_safe(b"search")?;
+
+if let Some(hit) = hits.first() {
+    println!("doc_id={}, offset={}", hit.doc_id, hit.doc_offset);
+}
+
+let doc = reader.get_document(42)?;
+```
+
 ### Build a multi-doc index
 
 ```rust
@@ -150,6 +187,8 @@ let reader = IndexReader::open("index.idx")?;
 
 let (sp, ep) = reader.count(b"doc")?;
 let locs = reader.locate(b"doc")?;
+let safe_count = reader.count_doc_safe(b"doc")?;
+let safe_locs = reader.locate_doc_safe(b"doc")?;
 
 if let Some(pos) = locs.first() {
     if let Some((doc_id, offset)) = reader.pos_to_doc_id(*pos) {

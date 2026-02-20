@@ -112,10 +112,40 @@ impl MultiShardReader {
         Ok(total)
     }
 
+    pub fn count_doc_safe(&self, pattern: &[u8]) -> io::Result<u64> {
+        let mut total = 0u64;
+        for shard in &self.shards {
+            total = total.saturating_add(shard.reader.count_doc_safe(pattern)? as u64);
+        }
+        Ok(total)
+    }
+
     pub fn locate(&self, pattern: &[u8]) -> io::Result<Vec<ShardHit>> {
         let mut hits = Vec::new();
         for shard in &self.shards {
             let locs = shard.reader.locate(pattern)?;
+            for pos in locs {
+                if let Some((seg_idx, seg_offset)) = shard.reader.pos_to_doc_id(pos)
+                    && let Some(seg) = shard.segments.get(seg_idx)
+                {
+                    let doc_offset = seg.doc_offset + seg_offset as u64;
+                    hits.push(ShardHit {
+                        shard_id: shard.shard_id,
+                        shard_pos: pos,
+                        doc_id: seg.doc_id,
+                        doc_offset,
+                    });
+                }
+            }
+        }
+        hits.sort_by_key(|h| (h.doc_id, h.doc_offset, h.shard_id, h.shard_pos));
+        Ok(hits)
+    }
+
+    pub fn locate_doc_safe(&self, pattern: &[u8]) -> io::Result<Vec<ShardHit>> {
+        let mut hits = Vec::new();
+        for shard in &self.shards {
+            let locs = shard.reader.locate_doc_safe(pattern)?;
             for pos in locs {
                 if let Some((seg_idx, seg_offset)) = shard.reader.pos_to_doc_id(pos)
                     && let Some(seg) = shard.segments.get(seg_idx)

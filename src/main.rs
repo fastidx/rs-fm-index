@@ -100,6 +100,9 @@ struct IngestArgs {
 struct QueryArgs {
     index: PathBuf,
     pattern: String,
+    /// Enforce document boundaries (no cross-doc matches)
+    #[arg(long)]
+    doc_safe: bool,
 }
 
 #[derive(Args)]
@@ -163,17 +166,15 @@ fn run_query(args: QueryArgs) {
     let engine = IndexReader::open(&args.index).expect("Failed to open index");
     let start = Instant::now();
 
-    match engine.count(args.pattern.as_bytes()) {
-        Ok((sp, ep)) => {
-            if sp > ep {
-                println!("Pattern not found.");
-            } else {
-                let count = ep - sp + 1;
-                println!("Found {} occurrences in {:.2?}", count, start.elapsed());
+    if args.doc_safe {
+        match engine.count_doc_safe(args.pattern.as_bytes()) {
+            Ok(count) => {
+                if count == 0 {
+                    println!("Pattern not found.");
+                } else {
+                    println!("Found {} occurrences in {:.2?}", count, start.elapsed());
 
-                // Locate first few
-                if count > 0 {
-                    let locs = engine.locate(args.pattern.as_bytes()).unwrap();
+                    let locs = engine.locate_doc_safe(args.pattern.as_bytes()).unwrap_or_default();
                     let preview = locs.iter().take(5).collect::<Vec<_>>();
                     println!("Locations (first 5): {:?}", preview);
                     for &&pos in preview.iter() {
@@ -183,8 +184,32 @@ fn run_query(args: QueryArgs) {
                     }
                 }
             }
+            Err(e) => println!("Error: {}", e),
         }
-        Err(e) => println!("Error: {}", e),
+    } else {
+        match engine.count(args.pattern.as_bytes()) {
+            Ok((sp, ep)) => {
+                if sp > ep {
+                    println!("Pattern not found.");
+                } else {
+                    let count = ep - sp + 1;
+                    println!("Found {} occurrences in {:.2?}", count, start.elapsed());
+
+                    // Locate first few
+                    if count > 0 {
+                        let locs = engine.locate(args.pattern.as_bytes()).unwrap();
+                        let preview = locs.iter().take(5).collect::<Vec<_>>();
+                        println!("Locations (first 5): {:?}", preview);
+                        for &&pos in preview.iter() {
+                            if let Some((doc_id, offset)) = engine.pos_to_doc_id(pos) {
+                                println!("  pos {} -> doc {} @ {}", pos, doc_id, offset);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("Error: {}", e),
+        }
     }
 }
 
@@ -192,7 +217,13 @@ fn run_query_shards(args: QueryArgs) {
     let router = MultiShardReader::open(&args.index).expect("Failed to open shard directory");
     let start = Instant::now();
 
-    match router.count(args.pattern.as_bytes()) {
+    let count_result = if args.doc_safe {
+        router.count_doc_safe(args.pattern.as_bytes())
+    } else {
+        router.count(args.pattern.as_bytes())
+    };
+
+    match count_result {
         Ok(count) => {
             if count == 0 {
                 println!("Pattern not found.");
@@ -206,7 +237,13 @@ fn run_query_shards(args: QueryArgs) {
                 start.elapsed()
             );
 
-            let hits = router.locate(args.pattern.as_bytes()).unwrap_or_default();
+            let hits = if args.doc_safe {
+                router
+                    .locate_doc_safe(args.pattern.as_bytes())
+                    .unwrap_or_default()
+            } else {
+                router.locate(args.pattern.as_bytes()).unwrap_or_default()
+            };
             let preview = hits.iter().take(5).collect::<Vec<_>>();
             println!("Locations (first 5): {:?}", preview);
             for hit in preview {

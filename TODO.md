@@ -45,6 +45,7 @@
 - [x] **CLI + Library API:** high-level builder/reader usable as a library.
 - [x] **Wavelet Build Benchmark:** streaming vs in-memory (`benches/wavelet_build.rs`).
 - [ ] **Benchmark:** Compare `PagedReader` vs `mmap` latency on large files.
+- [x] **Doc-safe Query:** `--doc-safe` flag with boundary-aware count/locate.
 - [x] **Wavelet Build Strategy:** selectable `in-memory`/`streaming`/`auto` with 256MiB default threshold.
 
 ## Phase 5: 200TB-Scale Readiness (Next)

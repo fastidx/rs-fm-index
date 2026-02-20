@@ -126,6 +126,29 @@ impl QueryEngine {
         Ok(locations)
     }
 
+    /// Locate occurrences that do not cross document boundaries.
+    pub fn locate_doc_safe(&self, pattern: &[u8]) -> io::Result<Vec<usize>> {
+        if pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+        let locs = self.locate(pattern)?;
+        let pat_len = pattern.len();
+        let mut out = Vec::with_capacity(locs.len());
+        for pos in locs {
+            if let Some(end) = self.doc_end_for_pos(pos) {
+                if pos + pat_len <= end {
+                    out.push(pos);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Count occurrences that do not cross document boundaries.
+    pub fn count_doc_safe(&self, pattern: &[u8]) -> io::Result<usize> {
+        Ok(self.locate_doc_safe(pattern)?.len())
+    }
+
     /// Extract a snippet of text from the index.
     /// Reconstructs original text[start .. start+len]
     pub fn extract(&self, start: usize, len: usize) -> io::Result<Vec<u8>> {
@@ -272,5 +295,15 @@ impl QueryEngine {
             }
         }
         Ok(bytes)
+    }
+
+    fn doc_end_for_pos(&self, pos: usize) -> Option<usize> {
+        let (doc_id, _) = self.pos_to_doc_id(pos)?;
+        let end = if doc_id + 1 < self.doc_offsets.len() {
+            self.doc_offsets[doc_id + 1] as usize
+        } else {
+            self.text_len.saturating_sub(1)
+        };
+        Some(end)
     }
 }

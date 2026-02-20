@@ -205,6 +205,14 @@ impl IndexReader {
         self.engine.locate(pattern)
     }
 
+    pub fn locate_doc_safe(&self, pattern: &[u8]) -> io::Result<Vec<usize>> {
+        self.engine.locate_doc_safe(pattern)
+    }
+
+    pub fn count_doc_safe(&self, pattern: &[u8]) -> io::Result<usize> {
+        self.engine.count_doc_safe(pattern)
+    }
+
     pub fn extract(&self, start: usize, len: usize) -> io::Result<Vec<u8>> {
         self.engine.extract(start, len)
     }
