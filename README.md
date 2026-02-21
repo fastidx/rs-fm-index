@@ -2,7 +2,7 @@
 
 This project builds and queries an FM-index backed by a Huffman-shaped Wavelet Tree, stored on disk with a paged bitvector and a sampled SA/ISA. It supports both **CLI usage** and **library integration**.
 
-Last updated: 2026-02-18
+Last updated: 2026-02-21
 
 Key features:
 
@@ -99,10 +99,32 @@ Query across shards (pass the shard directory; `query` auto-detects dirs):
 cargo run --release -- query ./shards "search"
 ```
 
+Shard queries merge segment hits back into document offsets and account for matches that cross shard boundaries within a document.
+
+Doc-safe query (prevents cross-doc matches):
+
+```
+cargo run --release -- query --doc-safe ./index.idx "search"
+cargo run --release -- query --doc-safe ./shards "search"
+```
+
 Extract a document from shards:
 
 ```
 cargo run --release -- doc ./shards 2 > doc3.txt
+```
+
+Wavelet build mode:
+
+```
+# auto (default) with 256MiB threshold
+cargo run --release -- build --wavelet-mode auto --wavelet-max-bytes 256MiB ./input.txt ./index.idx
+
+# force in-memory build
+cargo run --release -- build --wavelet-mode in-memory ./input.txt ./index.idx
+
+# force streaming build
+cargo run --release -- build --wavelet-mode streaming ./input.txt ./index.idx
 ```
 
 ---
@@ -147,17 +169,59 @@ use rust_fm_index::IndexReader;
 let reader = IndexReader::open("index.idx")?;
 let (sp, ep) = reader.count(b"doc")?;
 let locs = reader.locate(b"doc")?;
+let safe_count = reader.count_doc_safe(b"doc")?;
+let safe_locs = reader.locate_doc_safe(b"doc")?;
 let snippet = reader.extract(0, 5)?;
 
 let stats = reader.stats()?;
 println!("{stats:?}");
 ```
 
+### Reader configuration (page size + prefetch)
+
+```rust
+use rust_fm_index::{IndexReader, PagedReaderConfig, PrefetchMode};
+
+let reader = IndexReader::open_with_cache_and_reader_config(
+    "index.idx",
+    256 * 1024 * 1024,
+    16,
+    PagedReaderConfig {
+        page_size: 64 * 1024,
+        prefetch_pages: 2,
+        prefetch_mode: PrefetchMode::Async,
+    },
+)?;
+```
+
+`PrefetchMode::None` disables read-ahead, `Sync` performs read-ahead in the caller thread, and `Async` uses a background thread.
+
 ### Map positions to documents + reconstruct full docs
 
 ```rust
 let (doc_id, offset) = reader.pos_to_doc_id(locs[0]).unwrap();
 let doc = reader.get_document(doc_id)?;
+```
+
+### Query across shards (library)
+
+```rust
+use rust_fm_index::MultiShardReader;
+
+let reader = MultiShardReader::open("./shards")?;
+let total = reader.count_merged(b"search")?;
+let safe_total = reader.count_merged_doc_safe(b"search")?;
+
+let hits = reader.locate_merged(b"search")?;
+let safe_hits = reader.locate_merged_doc_safe(b"search")?;
+
+if let Some(hit) = hits.first() {
+    if let Some(pos) = hit.positions.first() {
+        println!("doc_id={}, offset={}", hit.doc_id, pos);
+    }
+}
+
+let doc = reader.get_document(42)?;
 ```
 
 ---
@@ -202,6 +266,11 @@ global offsets to document IDs.
 - **Sample rate** controls SA/ISA sampling density.
   - Lower = faster locate/extract, larger index.
   - Higher = smaller index, more LF steps.
+
+- **Wavelet build mode** controls how the wavelet bitvectors are built:
+  - `in-memory`: fastest, but uses more RAM.
+  - `streaming`: lowest RAM, slower.
+  - `auto` (default): uses `in-memory` if the plan fits under 256MiB, otherwise `streaming`.
 
 - **Cache size** can be customized with:
   ```rust

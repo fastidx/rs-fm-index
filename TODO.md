@@ -43,19 +43,22 @@
 - [x] **Query Logic:** `count()`, `locate()`, `extract()`.
 - [x] **Multi-Document Support:** doc offsets, `pos_to_doc_id()`, `get_document()`.
 - [x] **CLI + Library API:** high-level builder/reader usable as a library.
+- [x] **Wavelet Build Benchmark:** streaming vs in-memory (`benches/wavelet_build.rs`).
 - [ ] **Benchmark:** Compare `PagedReader` vs `mmap` latency on large files.
+- [x] **Doc-safe Query:** `--doc-safe` flag with boundary-aware count/locate.
+- [x] **Wavelet Build Strategy:** selectable `in-memory`/`streaming`/`auto` with 256MiB default threshold.
 
 ## Phase 5: 200TB-Scale Readiness (Next)
 
 - [x] **64-bit SA/ISA:** Move from u32 to u64 (or u40/u48 packing) for >4GB shards.
-- [ ] **External-memory SA/BWT:** Replace in-memory `cdivsufsort` with an external-memory algorithm.
-- [ ] **Streaming Build:** Avoid materializing full BWT/bitvectors; stream into pages.
+- [x] **External-memory SA/BWT:** Replace in-memory `cdivsufsort` with an external-memory algorithm.
+- [x] **Streaming Build:** Avoid materializing full BWT/bitvectors; stream into pages.
   - [x] Stream BWT to disk + sample SA/ISA on the fly.
-  - [ ] Stream wavelet bitvectors directly into paged layout.
+  - [x] Stream wavelet bitvectors directly into paged layout.
 - [ ] **Compressed SA/ISA:** Delta + varint/Rice/PFor for sampled arrays.
 - [ ] **Run-Length BWT / R-Index:** Replace Huffman WT with RLBWT or wavelet matrix of runs.
 - [ ] **Shard Routing & Merge:** Top-level routing layer and multi-shard query/merge.
   - [x] Shard routing layer (query + doc extraction across shard dirs).
-  - [ ] Multi-shard query merge/aggregation strategy.
+  - [x] Multi-shard query merge/aggregation strategy.
 - [x] **Doc Offsets Indexing:** Elias-Fano or sampled index for fast doc_id lookup at scale.
-- [ ] **I/O Pipeline:** Async prefetch, large sequential reads, configurable page size.
+- [x] **I/O Pipeline:** Async prefetch + configurable page size + read-ahead prefetch.

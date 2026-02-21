@@ -1,7 +1,10 @@
 use clap::{Args, Parser, Subcommand};
 use rust_fm_index::ingest::config::{IngestConfigFile, parse_size, size_value_to_usize};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
-use rust_fm_index::{EncodingMode, IndexBuilder, IndexReader, MultiShardReader};
+use rust_fm_index::{
+    DocHit, EncodingMode, IndexBuilder, IndexReader, MultiShardReader, WaveletBuildMode,
+    DEFAULT_WAVELET_MAX_BYTES,
+};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -33,6 +36,12 @@ struct BuildArgs {
     /// Enable binary mode (b+1 encoding with reserved sentinel)
     #[arg(long)]
     binary: bool,
+    /// Wavelet build mode: in-memory, streaming, auto
+    #[arg(long, default_value = "auto")]
+    wavelet_mode: String,
+    /// Max bytes for auto wavelet build mode (e.g. 256MiB)
+    #[arg(long, value_parser = parse_size, default_value = "256MiB")]
+    wavelet_max_bytes: usize,
 }
 
 #[derive(Args)]
@@ -45,6 +54,12 @@ struct BuildMultiArgs {
     /// Enable binary mode (b+1 encoding with reserved sentinel)
     #[arg(long)]
     binary: bool,
+    /// Wavelet build mode: in-memory, streaming, auto
+    #[arg(long, default_value = "auto")]
+    wavelet_mode: String,
+    /// Max bytes for auto wavelet build mode (e.g. 256MiB)
+    #[arg(long, value_parser = parse_size, default_value = "256MiB")]
+    wavelet_max_bytes: usize,
 }
 
 #[derive(Args)]
@@ -73,12 +88,21 @@ struct IngestArgs {
     /// Enable binary mode (b+1 encoding with reserved sentinel)
     #[arg(long)]
     binary: bool,
+    /// Wavelet build mode: in-memory, streaming, auto
+    #[arg(long)]
+    wavelet_mode: Option<String>,
+    /// Max bytes for auto wavelet build mode (e.g. 256MiB)
+    #[arg(long, value_parser = parse_size)]
+    wavelet_max_bytes: Option<usize>,
 }
 
 #[derive(Args)]
 struct QueryArgs {
     index: PathBuf,
     pattern: String,
+    /// Enforce document boundaries (no cross-doc matches)
+    #[arg(long)]
+    doc_safe: bool,
 }
 
 #[derive(Args)]
@@ -122,7 +146,10 @@ fn run_build(args: BuildArgs) {
     } else {
         EncodingMode::Text
     };
-    let builder = IndexBuilder::new(args.sample_rate).with_encoding_mode(encoding_mode);
+    let wavelet_mode = parse_wavelet_mode(&args.wavelet_mode, args.wavelet_max_bytes);
+    let builder = IndexBuilder::new(args.sample_rate)
+        .with_encoding_mode(encoding_mode)
+        .with_wavelet_mode(wavelet_mode);
     builder
         .build_single_document(&data, &args.output)
         .expect("Build failed");
@@ -139,17 +166,15 @@ fn run_query(args: QueryArgs) {
     let engine = IndexReader::open(&args.index).expect("Failed to open index");
     let start = Instant::now();
 
-    match engine.count(args.pattern.as_bytes()) {
-        Ok((sp, ep)) => {
-            if sp > ep {
-                println!("Pattern not found.");
-            } else {
-                let count = ep - sp + 1;
-                println!("Found {} occurrences in {:.2?}", count, start.elapsed());
+    if args.doc_safe {
+        match engine.count_doc_safe(args.pattern.as_bytes()) {
+            Ok(count) => {
+                if count == 0 {
+                    println!("Pattern not found.");
+                } else {
+                    println!("Found {} occurrences in {:.2?}", count, start.elapsed());
 
-                // Locate first few
-                if count > 0 {
-                    let locs = engine.locate(args.pattern.as_bytes()).unwrap();
+                    let locs = engine.locate_doc_safe(args.pattern.as_bytes()).unwrap_or_default();
                     let preview = locs.iter().take(5).collect::<Vec<_>>();
                     println!("Locations (first 5): {:?}", preview);
                     for &&pos in preview.iter() {
@@ -159,8 +184,32 @@ fn run_query(args: QueryArgs) {
                     }
                 }
             }
+            Err(e) => println!("Error: {}", e),
         }
-        Err(e) => println!("Error: {}", e),
+    } else {
+        match engine.count(args.pattern.as_bytes()) {
+            Ok((sp, ep)) => {
+                if sp > ep {
+                    println!("Pattern not found.");
+                } else {
+                    let count = ep - sp + 1;
+                    println!("Found {} occurrences in {:.2?}", count, start.elapsed());
+
+                    // Locate first few
+                    if count > 0 {
+                        let locs = engine.locate(args.pattern.as_bytes()).unwrap();
+                        let preview = locs.iter().take(5).collect::<Vec<_>>();
+                        println!("Locations (first 5): {:?}", preview);
+                        for &&pos in preview.iter() {
+                            if let Some((doc_id, offset)) = engine.pos_to_doc_id(pos) {
+                                println!("  pos {} -> doc {} @ {}", pos, doc_id, offset);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("Error: {}", e),
+        }
     }
 }
 
@@ -168,7 +217,13 @@ fn run_query_shards(args: QueryArgs) {
     let router = MultiShardReader::open(&args.index).expect("Failed to open shard directory");
     let start = Instant::now();
 
-    match router.count(args.pattern.as_bytes()) {
+    let count_result = if args.doc_safe {
+        router.count_merged_doc_safe(args.pattern.as_bytes())
+    } else {
+        router.count_merged(args.pattern.as_bytes())
+    };
+
+    match count_result {
         Ok(count) => {
             if count == 0 {
                 println!("Pattern not found.");
@@ -182,14 +237,26 @@ fn run_query_shards(args: QueryArgs) {
                 start.elapsed()
             );
 
-            let hits = router.locate(args.pattern.as_bytes()).unwrap_or_default();
-            let preview = hits.iter().take(5).collect::<Vec<_>>();
+            let hits: Vec<DocHit> = if args.doc_safe {
+                router
+                    .locate_merged_doc_safe(args.pattern.as_bytes())
+                    .unwrap_or_default()
+            } else {
+                router.locate_merged(args.pattern.as_bytes()).unwrap_or_default()
+            };
+
+            let mut flat_positions: Vec<(u64, u64)> = Vec::new();
+            for doc_hit in &hits {
+                for &pos in &doc_hit.positions {
+                    flat_positions.push((doc_hit.doc_id, pos));
+                }
+            }
+            flat_positions.sort_by_key(|(doc_id, pos)| (*doc_id, *pos));
+
+            let preview = flat_positions.iter().take(5).collect::<Vec<_>>();
             println!("Locations (first 5): {:?}", preview);
-            for hit in preview {
-                println!(
-                    "  shard {} pos {} -> doc {} @ {}",
-                    hit.shard_id, hit.shard_pos, hit.doc_id, hit.doc_offset
-                );
+            for (doc_id, pos) in preview {
+                println!("  doc {} @ {}", doc_id, pos);
             }
         }
         Err(e) => println!("Error: {}", e),
@@ -286,6 +353,14 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
+fn parse_wavelet_mode(mode: &str, max_bytes: usize) -> WaveletBuildMode {
+    match mode.to_ascii_lowercase().as_str() {
+        "in-memory" | "in_memory" | "memory" => WaveletBuildMode::InMemory,
+        "streaming" | "stream" => WaveletBuildMode::Streaming,
+        _ => WaveletBuildMode::Auto { max_bytes },
+    }
+}
+
 fn run_doc(args: DocArgs) {
     if args.index.is_dir() {
         let router = MultiShardReader::open(&args.index).expect("Failed to open shard directory");
@@ -317,7 +392,10 @@ fn run_build_multi(args: BuildMultiArgs) {
     } else {
         EncodingMode::Text
     };
-    let builder = IndexBuilder::new(args.sample_rate).with_encoding_mode(encoding_mode);
+    let wavelet_mode = parse_wavelet_mode(&args.wavelet_mode, args.wavelet_max_bytes);
+    let builder = IndexBuilder::new(args.sample_rate)
+        .with_encoding_mode(encoding_mode)
+        .with_wavelet_mode(wavelet_mode);
     let input_paths = args.inputs.clone();
     builder
         .build_multi_from_paths(&args.output, &input_paths)
@@ -407,6 +485,23 @@ fn run_ingest(args: IngestArgs) {
         EncodingMode::Text
     };
 
+    let wavelet_mode_str = args
+        .wavelet_mode
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.wavelet_mode.clone()))
+        .unwrap_or_else(|| "auto".to_string());
+
+    let wavelet_max_bytes = if let Some(v) = args.wavelet_max_bytes {
+        v
+    } else if let Some(cfg) = file_cfg.as_ref().and_then(|c| c.wavelet_max_bytes.as_ref()) {
+        size_value_to_usize(cfg).unwrap_or_else(|e| {
+            eprintln!("Invalid wavelet_max_bytes in config: {:?}", e);
+            std::process::exit(1);
+        })
+    } else {
+        DEFAULT_WAVELET_MAX_BYTES
+    };
+    let wavelet_mode = parse_wavelet_mode(&wavelet_mode_str, wavelet_max_bytes);
+
     println!("Starting distributed ingestion");
     println!("Patterns: {:?}", input_patterns);
     println!("Output: {:?}", output_dir);
@@ -423,6 +518,7 @@ fn run_ingest(args: IngestArgs) {
     println!("Workers: {}", workers);
     println!("Sample rate: {}", sample_rate);
     println!("Encoding mode: {:?}", encoding_mode);
+    println!("Wavelet mode: {:?}", wavelet_mode);
 
     let config = IngestConfig {
         input_patterns,
@@ -432,6 +528,7 @@ fn run_ingest(args: IngestArgs) {
         num_workers: workers,
         sample_rate,
         encoding_mode,
+        wavelet_mode,
     };
 
     let orchestrator = Orchestrator::new(config);

@@ -1,8 +1,9 @@
 use crate::index::builder::ShardBuilder;
 use crate::index::encoding::EncodingMode;
+use crate::index::wavelet::WaveletBuildMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
-use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
+use crate::iolib::paged_reader::{GlobalPageCache, PagedReader, PagedReaderConfig};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 pub struct IndexBuilder {
     sample_rate: u32,
     encoding_mode: EncodingMode,
+    wavelet_mode: WaveletBuildMode,
 }
 
 impl IndexBuilder {
@@ -20,11 +22,17 @@ impl IndexBuilder {
         Self {
             sample_rate,
             encoding_mode: EncodingMode::Text,
+            wavelet_mode: WaveletBuildMode::default(),
         }
     }
 
     pub fn with_encoding_mode(mut self, encoding_mode: EncodingMode) -> Self {
         self.encoding_mode = encoding_mode;
+        self
+    }
+
+    pub fn with_wavelet_mode(mut self, wavelet_mode: WaveletBuildMode) -> Self {
+        self.wavelet_mode = wavelet_mode;
         self
     }
 
@@ -35,7 +43,8 @@ impl IndexBuilder {
         text: &[u8],
         output_path: P,
     ) -> io::Result<()> {
-        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
         builder.build_with_offsets(text, vec![0], output_path)
     }
 
@@ -62,7 +71,8 @@ impl IndexBuilder {
             text.extend_from_slice(doc);
         }
 
-        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
         builder.build_with_offsets(&text, offsets, output_path)
     }
 
@@ -97,7 +107,8 @@ impl IndexBuilder {
         output_path: P,
     ) -> io::Result<()> {
         validate_doc_offsets(text.len(), doc_offsets)?;
-        let builder = ShardBuilder::new_with_mode(self.sample_rate, self.encoding_mode);
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
         builder.build_with_offsets(text, doc_offsets.to_vec(), output_path)
     }
 }
@@ -131,13 +142,27 @@ pub struct IndexStats {
 impl IndexReader {
     /// Open an index with a default cache configuration.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::open_with_cache(path, 128 * 1024 * 1024, 8)
+        Self::open_with_cache_and_reader_config(
+            path,
+            128 * 1024 * 1024,
+            8,
+            PagedReaderConfig::default(),
+        )
     }
 
     /// Open an index using a shared cache.
     pub fn open_with_shared_cache<P: AsRef<Path>>(
         path: P,
         cache: Arc<GlobalPageCache>,
+    ) -> io::Result<Self> {
+        Self::open_with_shared_cache_and_reader_config(path, cache, PagedReaderConfig::default())
+    }
+
+    /// Open an index using a shared cache and custom reader configuration.
+    pub fn open_with_shared_cache_and_reader_config<P: AsRef<Path>>(
+        path: P,
+        cache: Arc<GlobalPageCache>,
+        reader_config: PagedReaderConfig,
     ) -> io::Result<Self> {
         let path_ref = path.as_ref();
         let index_bytes = std::fs::metadata(path_ref)?.len();
@@ -147,7 +172,7 @@ impl IndexReader {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         let file_id = file_id_for_path(path_ref);
-        let reader = PagedReader::new(path_ref, file_id, cache)?;
+        let reader = PagedReader::new_with_config(path_ref, file_id, cache, reader_config)?;
         let engine = QueryEngine::new(header.clone(), reader);
         Ok(Self {
             header,
@@ -162,6 +187,21 @@ impl IndexReader {
         cache_bytes: usize,
         cache_shards: usize,
     ) -> io::Result<Self> {
+        Self::open_with_cache_and_reader_config(
+            path,
+            cache_bytes,
+            cache_shards,
+            PagedReaderConfig::default(),
+        )
+    }
+
+    /// Open an index with custom cache and reader configuration.
+    pub fn open_with_cache_and_reader_config<P: AsRef<Path>>(
+        path: P,
+        cache_bytes: usize,
+        cache_shards: usize,
+        reader_config: PagedReaderConfig,
+    ) -> io::Result<Self> {
         let path_ref = path.as_ref();
         let index_bytes = std::fs::metadata(path_ref)?.len();
         let mut file = std::fs::File::open(path_ref)?;
@@ -173,7 +213,7 @@ impl IndexReader {
 
         let file_id = file_id_for_path(path_ref);
 
-        let reader = PagedReader::new(path_ref, file_id, cache)?;
+        let reader = PagedReader::new_with_config(path_ref, file_id, cache, reader_config)?;
         let engine = QueryEngine::new(header.clone(), reader);
         Ok(Self {
             header,
@@ -192,6 +232,14 @@ impl IndexReader {
 
     pub fn locate(&self, pattern: &[u8]) -> io::Result<Vec<usize>> {
         self.engine.locate(pattern)
+    }
+
+    pub fn locate_doc_safe(&self, pattern: &[u8]) -> io::Result<Vec<usize>> {
+        self.engine.locate_doc_safe(pattern)
+    }
+
+    pub fn count_doc_safe(&self, pattern: &[u8]) -> io::Result<usize> {
+        self.engine.count_doc_safe(pattern)
     }
 
     pub fn extract(&self, start: usize, len: usize) -> io::Result<Vec<u8>> {

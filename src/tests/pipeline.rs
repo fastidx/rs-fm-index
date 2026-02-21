@@ -291,6 +291,7 @@ fn test_orchestrator_chunking() {
         num_workers: 2,
         sample_rate: 4,
         encoding_mode: EncodingMode::Text,
+        wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 
     let orch = Orchestrator::new(config);
@@ -341,6 +342,7 @@ fn test_orchestrator_oversized_split_metadata() {
         num_workers: 2,
         sample_rate: 4,
         encoding_mode: EncodingMode::Text,
+        wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 
     let orch = Orchestrator::new(config);
@@ -375,6 +377,46 @@ fn test_orchestrator_oversized_split_metadata() {
     assert!(last.is_last);
     assert_eq!(first.doc_id, last.doc_id);
     assert_eq!(first.part_index, 0);
+}
+
+#[test]
+fn test_multishard_merge_cross_boundary() {
+    use crate::ingest::orchestrator::{IngestConfig, Orchestrator};
+    use crate::MultiShardReader;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let input_dir = TempDir::new().unwrap();
+    let p = input_dir.path().join("doc.txt");
+    let mut f = std::fs::File::create(&p).unwrap();
+    f.write_all(b"abcdefghij").unwrap();
+
+    let output_dir = TempDir::new().unwrap();
+    let config = IngestConfig {
+        input_patterns: vec![input_dir.path().join("*.txt").to_string_lossy().to_string()],
+        output_dir: output_dir.path().to_path_buf(),
+        chunk_size: 8,
+        read_buffer: 4,
+        num_workers: 1,
+        sample_rate: 4,
+        encoding_mode: EncodingMode::Text,
+        wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
+    };
+
+    let orch = Orchestrator::new(config);
+    orch.run().expect("Orchestrator failed");
+
+    let router = MultiShardReader::open(output_dir.path()).unwrap();
+    let raw_hits = router.locate(b"fgh").unwrap();
+    assert!(raw_hits.is_empty(), "Expected no per-shard matches");
+
+    let merged = router.locate_merged(b"fgh").unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].doc_id, 0);
+    assert_eq!(merged[0].positions, vec![5]);
+
+    let total = router.count_merged(b"fgh").unwrap();
+    assert_eq!(total, 1);
 }
 
 #[test]

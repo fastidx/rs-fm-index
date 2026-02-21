@@ -3,14 +3,44 @@ use std::io::{self};
 use std::os::unix::fs::FileExt; // For pread
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 
 use crate::cache::sharded_fifo::ShardedFastS3Fifo;
+use crossbeam_channel::{bounded, Sender};
 
-const PAGE_SIZE: usize = 4096;
+pub const DEFAULT_PAGE_SIZE: usize = 4096;
+const PREFETCH_QUEUE_LEN: usize = 64;
 
 /// A global cache shared across all readers.
-/// Key: (FileID, PageIndex), Value: 4KB Page Data
-pub type GlobalPageCache = ShardedFastS3Fifo<(u64, u64), Vec<u8>>;
+/// Key: (FileID, PageSize, PageIndex), Value: Page Data
+pub type GlobalPageCache = ShardedFastS3Fifo<(u64, u32, u64), Vec<u8>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefetchMode {
+    /// No read-ahead.
+    None,
+    /// Read-ahead in the caller thread.
+    Sync,
+    /// Read-ahead in a background thread.
+    Async,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PagedReaderConfig {
+    pub page_size: usize,
+    pub prefetch_pages: usize,
+    pub prefetch_mode: PrefetchMode,
+}
+
+impl Default for PagedReaderConfig {
+    fn default() -> Self {
+        Self {
+            page_size: DEFAULT_PAGE_SIZE,
+            prefetch_pages: 0,
+            prefetch_mode: PrefetchMode::Sync,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct PagedReader {
@@ -18,23 +48,63 @@ pub struct PagedReader {
     file_id: u64, // Unique ID for this file (e.g., hash of path or inode)
     file_len: u64,
     cache: Arc<GlobalPageCache>,
+    page_size: usize,
+    prefetch_pages: usize,
+    prefetch_mode: PrefetchMode,
+    prefetcher: Option<Arc<PrefetchWorker>>,
 }
 
 impl PagedReader {
+    pub fn new_with_config<P: AsRef<Path>>(
+        path: P,
+        file_id: u64,
+        cache: Arc<GlobalPageCache>,
+        config: PagedReaderConfig,
+    ) -> io::Result<Self> {
+        if config.page_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "page_size must be > 0",
+            ));
+        }
+
+        let file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        let file = Arc::new(file);
+
+        let prefetcher = if config.prefetch_mode == PrefetchMode::Async
+            && config.prefetch_pages > 0
+        {
+            let ctx = PrefetchContext {
+                file: file.clone(),
+                file_len,
+                cache: cache.clone(),
+                file_id,
+                page_size: config.page_size,
+            };
+            Some(Arc::new(spawn_prefetch_worker(ctx)))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            file,
+            file_id,
+            file_len,
+            cache,
+            page_size: config.page_size,
+            prefetch_pages: config.prefetch_pages,
+            prefetch_mode: config.prefetch_mode,
+            prefetcher,
+        })
+    }
+
     pub fn new<P: AsRef<Path>>(
         path: P,
         file_id: u64,
         cache: Arc<GlobalPageCache>,
     ) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let file_len = file.metadata()?.len();
-
-        Ok(Self {
-            file: Arc::new(file),
-            file_id,
-            file_len,
-            cache,
-        })
+        Self::new_with_config(path, file_id, cache, PagedReaderConfig::default())
     }
 
     /// Read bytes at a specific offset using the S3-FIFO cache.
@@ -53,14 +123,14 @@ impl PagedReader {
 
         while bytes_copied < len {
             // 1. Identify the Page
-            let page_idx = current_offset / PAGE_SIZE as u64;
-            let offset_in_page = (current_offset % PAGE_SIZE as u64) as usize;
+            let page_idx = current_offset / self.page_size as u64;
+            let offset_in_page = (current_offset % self.page_size as u64) as usize;
 
             // 2. Fetch Page (Hit or Miss)
             let page_data = self.get_page(page_idx)?;
 
             // 3. Copy relevant data
-            let available_in_page = PAGE_SIZE - offset_in_page;
+            let available_in_page = self.page_size - offset_in_page;
             let needed = len - bytes_copied;
             let to_copy = available_in_page.min(needed);
 
@@ -76,37 +146,164 @@ impl PagedReader {
 
     /// Fetch a page from S3-FIFO cache or load from disk.
     fn get_page(&self, page_idx: u64) -> io::Result<Arc<Vec<u8>>> {
-        let key = (self.file_id, page_idx);
+        let key = self.cache_key(page_idx);
 
         // 1. Try Cache Hit
         if let Some(page) = self.cache.get(&key) {
             return Ok(page);
         }
 
-        // 2. Cache Miss: Read from Disk
+        // 2. Cache Miss: Read from Disk + Prefetch
         // Note: In a highly concurrent environment, two threads might read the same page
         // simultaneously here (thundering herd). For now, we accept the redundant I/O
         // to avoid complex lock sharding on "pending reads".
 
-        let mut buffer = vec![0u8; PAGE_SIZE];
-        let page_start = page_idx * PAGE_SIZE as u64;
+        match self.prefetch_mode {
+            PrefetchMode::None => {
+                self.read_pages_into_cache(page_idx, 1)?;
+            }
+            PrefetchMode::Sync => {
+                let pages = 1usize.saturating_add(self.prefetch_pages);
+                self.read_pages_into_cache(page_idx, pages)?;
+            }
+            PrefetchMode::Async => {
+                self.read_pages_into_cache(page_idx, 1)?;
+                if self.prefetch_pages > 0 {
+                    if let Some(worker) = &self.prefetcher {
+                        let _ = worker
+                            .tx
+                            .try_send(PrefetchRequest { page_idx: page_idx + 1, pages: self.prefetch_pages });
+                    }
+                }
+            }
+        }
 
-        // Handle partial last page
-        let read_len = if page_start + PAGE_SIZE as u64 > self.file_len {
-            (self.file_len - page_start) as usize
-        } else {
-            PAGE_SIZE
+        // 3. Return the requested page
+        if let Some(page) = self.cache.get(&key) {
+            return Ok(page);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "Failed to load page",
+        ))
+    }
+
+    fn cache_key(&self, page_idx: u64) -> (u64, u32, u64) {
+        (self.file_id, self.page_size as u32, page_idx)
+    }
+
+    fn read_at_fully(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let mut read = 0usize;
+        while read < buf.len() {
+            let n = self.file.read_at(&mut buf[read..], offset + read as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Read past EOF",
+                ));
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    fn read_pages_into_cache(&self, page_idx: u64, pages: usize) -> io::Result<()> {
+        let ctx = PrefetchContext {
+            file: self.file.clone(),
+            file_len: self.file_len,
+            cache: self.cache.clone(),
+            file_id: self.file_id,
+            page_size: self.page_size,
         };
+        ctx.read_pages_into_cache(page_idx, pages)
+    }
+}
 
-        // pread is thread-safe and atomic
-        self.file.read_at(&mut buffer[0..read_len], page_start)?;
+struct PrefetchRequest {
+    page_idx: u64,
+    pages: usize,
+}
 
-        let page_arc = Arc::new(buffer);
+struct PrefetchWorker {
+    tx: Sender<PrefetchRequest>,
+}
 
-        // 3. Insert into Cache
-        self.cache.put(key, page_arc.clone());
+fn spawn_prefetch_worker(ctx: PrefetchContext) -> PrefetchWorker {
+    let (tx, rx) = bounded::<PrefetchRequest>(PREFETCH_QUEUE_LEN);
+    thread::spawn(move || {
+        while let Ok(req) = rx.recv() {
+            let _ = ctx.read_pages_into_cache(req.page_idx, req.pages);
+        }
+    });
+    PrefetchWorker { tx }
+}
 
-        Ok(page_arc)
+#[derive(Clone)]
+struct PrefetchContext {
+    file: Arc<File>,
+    file_len: u64,
+    cache: Arc<GlobalPageCache>,
+    file_id: u64,
+    page_size: usize,
+}
+
+impl PrefetchContext {
+    fn cache_key(&self, page_idx: u64) -> (u64, u32, u64) {
+        (self.file_id, self.page_size as u32, page_idx)
+    }
+
+    fn read_at_fully(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let mut read = 0usize;
+        while read < buf.len() {
+            let n = self.file.read_at(&mut buf[read..], offset + read as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Read past EOF",
+                ));
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    fn read_pages_into_cache(&self, page_idx: u64, pages: usize) -> io::Result<()> {
+        if pages == 0 {
+            return Ok(());
+        }
+
+        let page_size = self.page_size as u64;
+        let page_start = page_idx * page_size;
+        if page_start >= self.file_len {
+            return Ok(());
+        }
+
+        let remaining_bytes = self.file_len - page_start;
+        let max_pages = (remaining_bytes + page_size - 1) / page_size;
+        let pages_to_read = std::cmp::min(pages as u64, max_pages) as usize;
+        let total_bytes = std::cmp::min(
+            remaining_bytes,
+            pages_to_read as u64 * page_size,
+        ) as usize;
+
+        let mut buffer = vec![0u8; total_bytes];
+        self.read_at_fully(page_start, &mut buffer)?;
+
+        for i in 0..pages_to_read {
+            let offset = i * self.page_size;
+            if offset >= buffer.len() {
+                break;
+            }
+
+            let end = std::cmp::min(offset + self.page_size, buffer.len());
+            let mut page_buf = vec![0u8; self.page_size];
+            page_buf[..end - offset].copy_from_slice(&buffer[offset..end]);
+            self.cache
+                .put(self.cache_key(page_idx + i as u64), Arc::new(page_buf));
+        }
+
+        Ok(())
     }
 }
 
@@ -128,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_read_single_page() {
-        let (file, data) = create_test_file(PAGE_SIZE * 2);
+        let (file, data) = create_test_file(DEFAULT_PAGE_SIZE * 2);
         let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1)); // 10MB cache
         let reader = PagedReader::new(file.path(), 1, cache).unwrap();
 
@@ -139,14 +336,14 @@ mod tests {
 
     #[test]
     fn test_read_cross_page_boundary() {
-        let (file, data) = create_test_file(PAGE_SIZE * 3);
+        let (file, data) = create_test_file(DEFAULT_PAGE_SIZE * 3);
         let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1));
         let reader = PagedReader::new(file.path(), 2, cache).unwrap();
 
         // Read across page 0 and page 1
         // Start: PAGE_SIZE - 10
         // End:   PAGE_SIZE + 10
-        let start = (PAGE_SIZE - 10) as u64;
+        let start = (DEFAULT_PAGE_SIZE - 10) as u64;
         let len = 20;
         let read_data = reader.read_at(start, len).unwrap();
 
@@ -166,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_access_same_file() {
-        let (file, data) = create_test_file(PAGE_SIZE * 10);
+        let (file, data) = create_test_file(DEFAULT_PAGE_SIZE * 10);
         let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 16));
         let path = file.path().to_path_buf();
         let data = Arc::new(data);
@@ -186,7 +383,7 @@ mod tests {
 
                 // Read a unique page based on thread ID to avoid trivial cache hits everywhere
                 // but also some overlap to test the cache logic.
-                let offset = (i * PAGE_SIZE / 2) as u64;
+                let offset = (i * DEFAULT_PAGE_SIZE / 2) as u64;
                 let read_data = reader.read_at(offset, 100).unwrap();
                 assert_eq!(
                     read_data,
@@ -198,5 +395,26 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_custom_page_size() {
+        let page_size = 1024;
+        let (file, data) = create_test_file(page_size * 4);
+        let cache = Arc::new(GlobalPageCache::new(2 * 1024 * 1024, 2));
+        let config = PagedReaderConfig {
+            page_size,
+            prefetch_pages: 2,
+            prefetch_mode: PrefetchMode::Sync,
+        };
+        let reader = PagedReader::new_with_config(file.path(), 4, cache, config).unwrap();
+
+        let start = (page_size - 5) as u64;
+        let len = 20;
+        let read_data = reader.read_at(start, len).unwrap();
+        assert_eq!(
+            read_data,
+            &data[(start as usize)..(start as usize + len)]
+        );
     }
 }
