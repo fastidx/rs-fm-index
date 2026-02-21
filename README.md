@@ -2,7 +2,7 @@
 
 This project builds and queries an FM-index backed by a Huffman-shaped Wavelet Tree, stored on disk with a paged bitvector and a sampled SA/ISA. It supports both **CLI usage** and **library integration**.
 
-Last updated: 2026-02-18
+Last updated: 2026-02-21
 
 Key features:
 
@@ -175,6 +175,22 @@ let snippet = reader.extract(0, 5)?;
 
 let stats = reader.stats()?;
 println!("{stats:?}");
+```
+
+### Reader configuration (page size + prefetch)
+
+```rust
+use rust_fm_index::{IndexReader, PagedReaderConfig};
+
+let reader = IndexReader::open_with_cache_and_reader_config(
+    "index.idx",
+    256 * 1024 * 1024,
+    16,
+    PagedReaderConfig {
+        page_size: 64 * 1024,
+        prefetch_pages: 2,
+    },
+)?;
 ```
 
 ### Map positions to documents + reconstruct full docs

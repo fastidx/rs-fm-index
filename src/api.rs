@@ -3,7 +3,7 @@ use crate::index::encoding::EncodingMode;
 use crate::index::wavelet::WaveletBuildMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
-use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
+use crate::iolib::paged_reader::{GlobalPageCache, PagedReader, PagedReaderConfig};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -142,13 +142,27 @@ pub struct IndexStats {
 impl IndexReader {
     /// Open an index with a default cache configuration.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::open_with_cache(path, 128 * 1024 * 1024, 8)
+        Self::open_with_cache_and_reader_config(
+            path,
+            128 * 1024 * 1024,
+            8,
+            PagedReaderConfig::default(),
+        )
     }
 
     /// Open an index using a shared cache.
     pub fn open_with_shared_cache<P: AsRef<Path>>(
         path: P,
         cache: Arc<GlobalPageCache>,
+    ) -> io::Result<Self> {
+        Self::open_with_shared_cache_and_reader_config(path, cache, PagedReaderConfig::default())
+    }
+
+    /// Open an index using a shared cache and custom reader configuration.
+    pub fn open_with_shared_cache_and_reader_config<P: AsRef<Path>>(
+        path: P,
+        cache: Arc<GlobalPageCache>,
+        reader_config: PagedReaderConfig,
     ) -> io::Result<Self> {
         let path_ref = path.as_ref();
         let index_bytes = std::fs::metadata(path_ref)?.len();
@@ -158,7 +172,7 @@ impl IndexReader {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         let file_id = file_id_for_path(path_ref);
-        let reader = PagedReader::new(path_ref, file_id, cache)?;
+        let reader = PagedReader::new_with_config(path_ref, file_id, cache, reader_config)?;
         let engine = QueryEngine::new(header.clone(), reader);
         Ok(Self {
             header,
@@ -173,6 +187,21 @@ impl IndexReader {
         cache_bytes: usize,
         cache_shards: usize,
     ) -> io::Result<Self> {
+        Self::open_with_cache_and_reader_config(
+            path,
+            cache_bytes,
+            cache_shards,
+            PagedReaderConfig::default(),
+        )
+    }
+
+    /// Open an index with custom cache and reader configuration.
+    pub fn open_with_cache_and_reader_config<P: AsRef<Path>>(
+        path: P,
+        cache_bytes: usize,
+        cache_shards: usize,
+        reader_config: PagedReaderConfig,
+    ) -> io::Result<Self> {
         let path_ref = path.as_ref();
         let index_bytes = std::fs::metadata(path_ref)?.len();
         let mut file = std::fs::File::open(path_ref)?;
@@ -184,7 +213,7 @@ impl IndexReader {
 
         let file_id = file_id_for_path(path_ref);
 
-        let reader = PagedReader::new(path_ref, file_id, cache)?;
+        let reader = PagedReader::new_with_config(path_ref, file_id, cache, reader_config)?;
         let engine = QueryEngine::new(header.clone(), reader);
         Ok(Self {
             header,

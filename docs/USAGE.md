@@ -238,6 +238,22 @@ Binary mode:
 let reader = IndexReader::open_with_cache("index.idx", 512 * 1024 * 1024, 16)?;
 ```
 
+- Tune page size and prefetch to balance random access vs throughput:
+
+```rust
+use rust_fm_index::PagedReaderConfig;
+
+let reader = IndexReader::open_with_cache_and_reader_config(
+    "index.idx",
+    512 * 1024 * 1024,
+    16,
+    PagedReaderConfig {
+        page_size: 64 * 1024,
+        prefetch_pages: 2,
+    },
+)?;
+```
+
 ---
 
 ## Common Pitfalls

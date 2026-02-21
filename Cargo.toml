@@ -26,3 +26,7 @@ criterion = "0.5"
 [[bench]]
 name = "wavelet_build"
 harness = false
+
+[[bench]]
+name = "paged_reader"
+harness = false

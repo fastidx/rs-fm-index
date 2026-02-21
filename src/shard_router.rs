@@ -1,6 +1,6 @@
 use crate::api::IndexReader;
 use crate::ingest::orchestrator::{DocumentSegmentMeta, ShardMeta};
-use crate::iolib::paged_reader::GlobalPageCache;
+use crate::iolib::paged_reader::{GlobalPageCache, PagedReaderConfig};
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
@@ -50,13 +50,32 @@ pub struct MultiShardReader {
 
 impl MultiShardReader {
     pub fn open<P: AsRef<Path>>(dir: P) -> io::Result<Self> {
-        Self::open_with_cache(dir, 256 * 1024 * 1024, 16)
+        Self::open_with_cache_and_reader_config(
+            dir,
+            256 * 1024 * 1024,
+            16,
+            PagedReaderConfig::default(),
+        )
     }
 
     pub fn open_with_cache<P: AsRef<Path>>(
         dir: P,
         cache_bytes: usize,
         cache_shards: usize,
+    ) -> io::Result<Self> {
+        Self::open_with_cache_and_reader_config(
+            dir,
+            cache_bytes,
+            cache_shards,
+            PagedReaderConfig::default(),
+        )
+    }
+
+    pub fn open_with_cache_and_reader_config<P: AsRef<Path>>(
+        dir: P,
+        cache_bytes: usize,
+        cache_shards: usize,
+        reader_config: PagedReaderConfig,
     ) -> io::Result<Self> {
         let dir = dir.as_ref();
         let meta_paths = collect_meta_paths(dir)?;
@@ -77,7 +96,11 @@ impl MultiShardReader {
                 serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let index_path = resolve_index_path(&meta_path, &meta.index_path);
-            let reader = IndexReader::open_with_shared_cache(&index_path, cache.clone())?;
+            let reader = IndexReader::open_with_shared_cache_and_reader_config(
+                &index_path,
+                cache.clone(),
+                reader_config,
+            )?;
 
             let shard_idx = shards.len();
             for seg in meta.segments.iter() {

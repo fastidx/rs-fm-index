@@ -1,12 +1,14 @@
 # Changelog
 
-## [Unreleased] - 2026-02-18
+## [Unreleased] - 2026-02-21
 
 ### Added
 
 - Multi-shard query merge/aggregation: doc-level hit grouping with cross-boundary stitching.
 - CLI support for querying shard directories and extracting documents from shards.
 - Shared cache support for multi-shard readers.
+- Configurable PagedReader page size and read-ahead prefetch.
+- Added Criterion benchmark for paged reader sequential read patterns.
 - Streaming wavelet-tree build from a BWT reader (no in-memory BWT).
 - Binary-safe encoding mode (b+1 remap) with header flag and CLI `--binary`.
 - Wavelet build strategy selection (`in-memory`, `streaming`, `auto`) with 256MiB default threshold and CLI flags.
