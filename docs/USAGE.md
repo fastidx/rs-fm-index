@@ -92,6 +92,8 @@ Query a shard directory:
 cargo run --release -- query ./shards "search"
 ```
 
+Shard queries merge segment hits back into document offsets and account for matches that cross shard boundaries within a document.
+
 Doc-safe query (prevents cross-doc matches):
 
 ```
@@ -151,14 +153,16 @@ use rust_fm_index::MultiShardReader;
 
 let reader = MultiShardReader::open("./shards")?;
 
-let total = reader.count(b"search")?;
-let safe_total = reader.count_doc_safe(b"search")?;
+let total = reader.count_merged(b"search")?;
+let safe_total = reader.count_merged_doc_safe(b"search")?;
 
-let hits = reader.locate(b"search")?;
-let safe_hits = reader.locate_doc_safe(b"search")?;
+let hits = reader.locate_merged(b"search")?;
+let safe_hits = reader.locate_merged_doc_safe(b"search")?;
 
 if let Some(hit) = hits.first() {
-    println!("doc_id={}, offset={}", hit.doc_id, hit.doc_offset);
+    if let Some(pos) = hit.positions.first() {
+        println!("doc_id={}, offset={}", hit.doc_id, pos);
+    }
 }
 
 let doc = reader.get_document(42)?;

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Multi-shard query router with merged locate/count across shard directories.
+- Multi-shard query merge/aggregation: doc-level hit grouping with cross-boundary stitching.
 - CLI support for querying shard directories and extracting documents from shards.
 - Shared cache support for multi-shard readers.
 - Streaming wavelet-tree build from a BWT reader (no in-memory BWT).

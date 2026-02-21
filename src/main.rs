@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use rust_fm_index::ingest::config::{IngestConfigFile, parse_size, size_value_to_usize};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
 use rust_fm_index::{
-    EncodingMode, IndexBuilder, IndexReader, MultiShardReader, WaveletBuildMode,
+    DocHit, EncodingMode, IndexBuilder, IndexReader, MultiShardReader, WaveletBuildMode,
     DEFAULT_WAVELET_MAX_BYTES,
 };
 use std::io::Write;
@@ -218,9 +218,9 @@ fn run_query_shards(args: QueryArgs) {
     let start = Instant::now();
 
     let count_result = if args.doc_safe {
-        router.count_doc_safe(args.pattern.as_bytes())
+        router.count_merged_doc_safe(args.pattern.as_bytes())
     } else {
-        router.count(args.pattern.as_bytes())
+        router.count_merged(args.pattern.as_bytes())
     };
 
     match count_result {
@@ -237,20 +237,26 @@ fn run_query_shards(args: QueryArgs) {
                 start.elapsed()
             );
 
-            let hits = if args.doc_safe {
+            let hits: Vec<DocHit> = if args.doc_safe {
                 router
-                    .locate_doc_safe(args.pattern.as_bytes())
+                    .locate_merged_doc_safe(args.pattern.as_bytes())
                     .unwrap_or_default()
             } else {
-                router.locate(args.pattern.as_bytes()).unwrap_or_default()
+                router.locate_merged(args.pattern.as_bytes()).unwrap_or_default()
             };
-            let preview = hits.iter().take(5).collect::<Vec<_>>();
+
+            let mut flat_positions: Vec<(u64, u64)> = Vec::new();
+            for doc_hit in &hits {
+                for &pos in &doc_hit.positions {
+                    flat_positions.push((doc_hit.doc_id, pos));
+                }
+            }
+            flat_positions.sort_by_key(|(doc_id, pos)| (*doc_id, *pos));
+
+            let preview = flat_positions.iter().take(5).collect::<Vec<_>>();
             println!("Locations (first 5): {:?}", preview);
-            for hit in preview {
-                println!(
-                    "  shard {} pos {} -> doc {} @ {}",
-                    hit.shard_id, hit.shard_pos, hit.doc_id, hit.doc_offset
-                );
+            for (doc_id, pos) in preview {
+                println!("  doc {} @ {}", doc_id, pos);
             }
         }
         Err(e) => println!("Error: {}", e),

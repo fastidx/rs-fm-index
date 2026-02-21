@@ -17,11 +17,24 @@ pub struct ShardHit {
 }
 
 #[derive(Debug, Clone)]
+pub struct DocHit {
+    pub doc_id: u64,
+    pub positions: Vec<u64>,
+}
+
+impl DocHit {
+    pub fn count(&self) -> usize {
+        self.positions.len()
+    }
+}
+
+#[derive(Debug, Clone)]
 struct SegmentRef {
     shard_idx: usize,
     part_index: u32,
     len: u64,
     shard_offset: u64,
+    doc_offset: u64,
 }
 
 struct ShardHandle {
@@ -76,6 +89,7 @@ impl MultiShardReader {
                         part_index: seg.part_index,
                         len: seg.len,
                         shard_offset: seg.shard_offset,
+                        doc_offset: seg.doc_offset,
                     });
             }
 
@@ -164,6 +178,24 @@ impl MultiShardReader {
         Ok(hits)
     }
 
+    pub fn locate_merged(&self, pattern: &[u8]) -> io::Result<Vec<DocHit>> {
+        self.locate_merged_impl(pattern, false)
+    }
+
+    pub fn locate_merged_doc_safe(&self, pattern: &[u8]) -> io::Result<Vec<DocHit>> {
+        self.locate_merged_impl(pattern, true)
+    }
+
+    pub fn count_merged(&self, pattern: &[u8]) -> io::Result<u64> {
+        let hits = self.locate_merged(pattern)?;
+        Ok(hits.iter().map(|h| h.positions.len() as u64).sum())
+    }
+
+    pub fn count_merged_doc_safe(&self, pattern: &[u8]) -> io::Result<u64> {
+        let hits = self.locate_merged_doc_safe(pattern)?;
+        Ok(hits.iter().map(|h| h.positions.len() as u64).sum())
+    }
+
     pub fn get_document(&self, doc_id: u64) -> io::Result<Vec<u8>> {
         let segments = self.doc_segments.get(&doc_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "doc_id not found")
@@ -179,6 +211,101 @@ impl MultiShardReader {
         }
         Ok(out)
     }
+
+    fn locate_merged_impl(&self, pattern: &[u8], doc_safe: bool) -> io::Result<Vec<DocHit>> {
+        let mut per_doc: HashMap<u64, Vec<u64>> = HashMap::new();
+
+        let base_hits = if doc_safe {
+            self.locate_doc_safe(pattern)?
+        } else {
+            self.locate(pattern)?
+        };
+
+        for hit in base_hits {
+            per_doc.entry(hit.doc_id).or_default().push(hit.doc_offset);
+        }
+
+        let boundary_hits = self.cross_boundary_hits(pattern)?;
+        for (doc_id, pos) in boundary_hits {
+            per_doc.entry(doc_id).or_default().push(pos);
+        }
+
+        let mut out = Vec::with_capacity(per_doc.len());
+        for (doc_id, mut positions) in per_doc {
+            positions.sort_unstable();
+            positions.dedup();
+            out.push(DocHit { doc_id, positions });
+        }
+        out.sort_by_key(|h| h.doc_id);
+        Ok(out)
+    }
+
+    fn cross_boundary_hits(&self, pattern: &[u8]) -> io::Result<Vec<(u64, u64)>> {
+        if pattern.len() <= 1 {
+            return Ok(Vec::new());
+        }
+
+        let mut hits = Vec::new();
+        let pat_len = pattern.len();
+
+        for (doc_id, segments) in &self.doc_segments {
+            if segments.len() < 2 {
+                continue;
+            }
+
+            for window in segments.windows(2) {
+                let a = &window[0];
+                let b = &window[1];
+                if a.part_index + 1 != b.part_index {
+                    continue;
+                }
+
+                let suffix_len = std::cmp::min(pat_len - 1, a.len as usize);
+                let prefix_len = std::cmp::min(pat_len - 1, b.len as usize);
+                if suffix_len + prefix_len < pat_len {
+                    continue;
+                }
+
+                let shard_a = &self.shards[a.shard_idx];
+                let shard_b = &self.shards[b.shard_idx];
+
+                let suffix_start = a.shard_offset + a.len - suffix_len as u64;
+                let suffix = shard_a
+                    .reader
+                    .extract(suffix_start as usize, suffix_len)?;
+                let prefix = shard_b
+                    .reader
+                    .extract(b.shard_offset as usize, prefix_len)?;
+
+                let mut window_bytes = Vec::with_capacity(suffix_len + prefix_len);
+                window_bytes.extend_from_slice(&suffix);
+                window_bytes.extend_from_slice(&prefix);
+
+                for offset in find_cross_boundary_positions(&window_bytes, suffix_len, pattern) {
+                    let doc_pos =
+                        a.doc_offset + (a.len - suffix_len as u64) + offset as u64;
+                    hits.push((*doc_id, doc_pos));
+                }
+            }
+        }
+
+        Ok(hits)
+    }
+}
+
+fn find_cross_boundary_positions(window: &[u8], boundary: usize, pattern: &[u8]) -> Vec<usize> {
+    if pattern.is_empty() || window.len() < pattern.len() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let pat_len = pattern.len();
+    for (i, chunk) in window.windows(pat_len).enumerate() {
+        if chunk == pattern && i < boundary && i + pat_len > boundary {
+            out.push(i);
+        }
+    }
+    out
 }
 
 fn collect_meta_paths(dir: &Path) -> io::Result<Vec<PathBuf>> {
