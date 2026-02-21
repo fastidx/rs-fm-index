@@ -4,7 +4,9 @@ use criterion::{
 use rand::rngs::StdRng;
 use rand::RngExt;
 use rand::SeedableRng;
-use rust_fm_index::iolib::paged_reader::{GlobalPageCache, PagedReader, PagedReaderConfig};
+use rust_fm_index::iolib::paged_reader::{
+    GlobalPageCache, PagedReader, PagedReaderConfig, PrefetchMode,
+};
 use std::io::Write;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -48,9 +50,46 @@ fn bench_paged_reader(c: &mut Criterion) {
     let total_bytes = (offsets.len() * READ_LEN) as u64;
 
     let configs = [
-        ("4k_no_prefetch", PagedReaderConfig { page_size: 4 * 1024, prefetch_pages: 0 }),
-        ("4k_prefetch_4", PagedReaderConfig { page_size: 4 * 1024, prefetch_pages: 4 }),
-        ("64k_prefetch_2", PagedReaderConfig { page_size: 64 * 1024, prefetch_pages: 2 }),
+        (
+            "4k_no_prefetch",
+            PagedReaderConfig {
+                page_size: 4 * 1024,
+                prefetch_pages: 0,
+                prefetch_mode: PrefetchMode::None,
+            },
+        ),
+        (
+            "4k_prefetch_4",
+            PagedReaderConfig {
+                page_size: 4 * 1024,
+                prefetch_pages: 4,
+                prefetch_mode: PrefetchMode::Sync,
+            },
+        ),
+        (
+            "4k_prefetch_4_async",
+            PagedReaderConfig {
+                page_size: 4 * 1024,
+                prefetch_pages: 4,
+                prefetch_mode: PrefetchMode::Async,
+            },
+        ),
+        (
+            "64k_prefetch_2",
+            PagedReaderConfig {
+                page_size: 64 * 1024,
+                prefetch_pages: 2,
+                prefetch_mode: PrefetchMode::Sync,
+            },
+        ),
+        (
+            "64k_prefetch_2_async",
+            PagedReaderConfig {
+                page_size: 64 * 1024,
+                prefetch_pages: 2,
+                prefetch_mode: PrefetchMode::Async,
+            },
+        ),
     ];
 
     let mut group = c.benchmark_group("paged_reader_seq_small");

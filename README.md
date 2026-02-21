@@ -180,7 +180,7 @@ println!("{stats:?}");
 ### Reader configuration (page size + prefetch)
 
 ```rust
-use rust_fm_index::{IndexReader, PagedReaderConfig};
+use rust_fm_index::{IndexReader, PagedReaderConfig, PrefetchMode};
 
 let reader = IndexReader::open_with_cache_and_reader_config(
     "index.idx",
@@ -189,9 +189,12 @@ let reader = IndexReader::open_with_cache_and_reader_config(
     PagedReaderConfig {
         page_size: 64 * 1024,
         prefetch_pages: 2,
+        prefetch_mode: PrefetchMode::Async,
     },
 )?;
 ```
+
+`PrefetchMode::None` disables read-ahead, `Sync` performs read-ahead in the caller thread, and `Async` uses a background thread.
 
 ### Map positions to documents + reconstruct full docs
 

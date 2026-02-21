@@ -61,4 +61,4 @@
   - [x] Shard routing layer (query + doc extraction across shard dirs).
   - [x] Multi-shard query merge/aggregation strategy.
 - [x] **Doc Offsets Indexing:** Elias-Fano or sampled index for fast doc_id lookup at scale.
-- [ ] **I/O Pipeline:** Async prefetch (pending); configurable page size + read-ahead prefetch done.
+- [x] **I/O Pipeline:** Async prefetch + configurable page size + read-ahead prefetch.

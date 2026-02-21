@@ -3,19 +3,33 @@ use std::io::{self};
 use std::os::unix::fs::FileExt; // For pread
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 
 use crate::cache::sharded_fifo::ShardedFastS3Fifo;
+use crossbeam_channel::{bounded, Sender};
 
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
+const PREFETCH_QUEUE_LEN: usize = 64;
 
 /// A global cache shared across all readers.
 /// Key: (FileID, PageSize, PageIndex), Value: Page Data
 pub type GlobalPageCache = ShardedFastS3Fifo<(u64, u32, u64), Vec<u8>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefetchMode {
+    /// No read-ahead.
+    None,
+    /// Read-ahead in the caller thread.
+    Sync,
+    /// Read-ahead in a background thread.
+    Async,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PagedReaderConfig {
     pub page_size: usize,
     pub prefetch_pages: usize,
+    pub prefetch_mode: PrefetchMode,
 }
 
 impl Default for PagedReaderConfig {
@@ -23,6 +37,7 @@ impl Default for PagedReaderConfig {
         Self {
             page_size: DEFAULT_PAGE_SIZE,
             prefetch_pages: 0,
+            prefetch_mode: PrefetchMode::Sync,
         }
     }
 }
@@ -35,6 +50,8 @@ pub struct PagedReader {
     cache: Arc<GlobalPageCache>,
     page_size: usize,
     prefetch_pages: usize,
+    prefetch_mode: PrefetchMode,
+    prefetcher: Option<Arc<PrefetchWorker>>,
 }
 
 impl PagedReader {
@@ -53,14 +70,32 @@ impl PagedReader {
 
         let file = File::open(path)?;
         let file_len = file.metadata()?.len();
+        let file = Arc::new(file);
+
+        let prefetcher = if config.prefetch_mode == PrefetchMode::Async
+            && config.prefetch_pages > 0
+        {
+            let ctx = PrefetchContext {
+                file: file.clone(),
+                file_len,
+                cache: cache.clone(),
+                file_id,
+                page_size: config.page_size,
+            };
+            Some(Arc::new(spawn_prefetch_worker(ctx)))
+        } else {
+            None
+        };
 
         Ok(Self {
-            file: Arc::new(file),
+            file,
             file_id,
             file_len,
             cache,
             page_size: config.page_size,
             prefetch_pages: config.prefetch_pages,
+            prefetch_mode: config.prefetch_mode,
+            prefetcher,
         })
     }
 
@@ -123,8 +158,25 @@ impl PagedReader {
         // simultaneously here (thundering herd). For now, we accept the redundant I/O
         // to avoid complex lock sharding on "pending reads".
 
-        let pages = 1usize.saturating_add(self.prefetch_pages);
-        self.read_pages_into_cache(page_idx, pages)?;
+        match self.prefetch_mode {
+            PrefetchMode::None => {
+                self.read_pages_into_cache(page_idx, 1)?;
+            }
+            PrefetchMode::Sync => {
+                let pages = 1usize.saturating_add(self.prefetch_pages);
+                self.read_pages_into_cache(page_idx, pages)?;
+            }
+            PrefetchMode::Async => {
+                self.read_pages_into_cache(page_idx, 1)?;
+                if self.prefetch_pages > 0 {
+                    if let Some(worker) = &self.prefetcher {
+                        let _ = worker
+                            .tx
+                            .try_send(PrefetchRequest { page_idx: page_idx + 1, pages: self.prefetch_pages });
+                    }
+                }
+            }
+        }
 
         // 3. Return the requested page
         if let Some(page) = self.cache.get(&key) {
@@ -157,6 +209,66 @@ impl PagedReader {
     }
 
     fn read_pages_into_cache(&self, page_idx: u64, pages: usize) -> io::Result<()> {
+        let ctx = PrefetchContext {
+            file: self.file.clone(),
+            file_len: self.file_len,
+            cache: self.cache.clone(),
+            file_id: self.file_id,
+            page_size: self.page_size,
+        };
+        ctx.read_pages_into_cache(page_idx, pages)
+    }
+}
+
+struct PrefetchRequest {
+    page_idx: u64,
+    pages: usize,
+}
+
+struct PrefetchWorker {
+    tx: Sender<PrefetchRequest>,
+}
+
+fn spawn_prefetch_worker(ctx: PrefetchContext) -> PrefetchWorker {
+    let (tx, rx) = bounded::<PrefetchRequest>(PREFETCH_QUEUE_LEN);
+    thread::spawn(move || {
+        while let Ok(req) = rx.recv() {
+            let _ = ctx.read_pages_into_cache(req.page_idx, req.pages);
+        }
+    });
+    PrefetchWorker { tx }
+}
+
+#[derive(Clone)]
+struct PrefetchContext {
+    file: Arc<File>,
+    file_len: u64,
+    cache: Arc<GlobalPageCache>,
+    file_id: u64,
+    page_size: usize,
+}
+
+impl PrefetchContext {
+    fn cache_key(&self, page_idx: u64) -> (u64, u32, u64) {
+        (self.file_id, self.page_size as u32, page_idx)
+    }
+
+    fn read_at_fully(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let mut read = 0usize;
+        while read < buf.len() {
+            let n = self.file.read_at(&mut buf[read..], offset + read as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Read past EOF",
+                ));
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    fn read_pages_into_cache(&self, page_idx: u64, pages: usize) -> io::Result<()> {
         if pages == 0 {
             return Ok(());
         }
@@ -164,10 +276,7 @@ impl PagedReader {
         let page_size = self.page_size as u64;
         let page_start = page_idx * page_size;
         if page_start >= self.file_len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Read past EOF",
-            ));
+            return Ok(());
         }
 
         let remaining_bytes = self.file_len - page_start;
@@ -296,6 +405,7 @@ mod tests {
         let config = PagedReaderConfig {
             page_size,
             prefetch_pages: 2,
+            prefetch_mode: PrefetchMode::Sync,
         };
         let reader = PagedReader::new_with_config(file.path(), 4, cache, config).unwrap();
 

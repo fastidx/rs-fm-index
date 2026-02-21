@@ -7,7 +7,7 @@
 - Multi-shard query merge/aggregation: doc-level hit grouping with cross-boundary stitching.
 - CLI support for querying shard directories and extracting documents from shards.
 - Shared cache support for multi-shard readers.
-- Configurable PagedReader page size and read-ahead prefetch.
+- Configurable PagedReader page size with sync/async prefetch modes.
 - Added Criterion benchmark for paged reader sequential read patterns.
 - Streaming wavelet-tree build from a BWT reader (no in-memory BWT).
 - Binary-safe encoding mode (b+1 remap) with header flag and CLI `--binary`.
