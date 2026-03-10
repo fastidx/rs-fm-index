@@ -126,6 +126,16 @@ let builder = IndexBuilder::new(32);
 builder.build_single_document(b"hello world", "index.idx")?;
 ```
 
+### Build to any writer
+
+```rust
+use rust_fm_index::IndexBuilder;
+
+let builder = IndexBuilder::new(32);
+let mut index_bytes = Vec::new();
+builder.build_single_document_to_writer(b"hello world", &mut index_bytes)?;
+```
+
 ### Wavelet build mode
 
 ```rust
@@ -202,6 +212,41 @@ if let Some(pos) = locs.first() {
 
 let stats = reader.stats()?;
 println!("{stats:?}");
+```
+
+### Open from a custom random-access source
+
+```rust
+use rust_fm_index::{IndexReader, RandomAccessRead};
+use std::io;
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct InMemorySource {
+    data: Arc<Vec<u8>>,
+}
+
+impl RandomAccessRead for InMemorySource {
+    fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let start = offset as usize;
+        let end = start + buf.len();
+        if end > self.data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Read past EOF"));
+        }
+        buf.copy_from_slice(&self.data[start..end]);
+        Ok(())
+    }
+}
+
+let index_bytes = std::fs::read("index.idx")?;
+let source = InMemorySource {
+    data: Arc::new(index_bytes),
+};
+let reader = IndexReader::open_with_source(source)?;
 ```
 
 ### Reconstruct a document

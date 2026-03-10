@@ -8,6 +8,8 @@
 - CLI support for querying shard directories and extracting documents from shards.
 - Shared cache support for multi-shard readers.
 - Configurable PagedReader page size with sync/async prefetch modes.
+- Generic output APIs for index build (`*_to_writer`) so index bytes can be written to any `Write`.
+- Generic input APIs for query open (`IndexReader::open_with_source` / `open_with_shared_source`) via a random-access source trait.
 - Added Criterion benchmark for paged reader sequential read patterns.
 - Streaming wavelet-tree build from a BWT reader (no in-memory BWT).
 - Binary-safe encoding mode (b+1 remap) with header flag and CLI `--binary`.
@@ -19,6 +21,7 @@
 - `ShardHeader::new` now uses a params struct to reduce argument count.
 - Minor internal refactors for Clippy hygiene.
 - Builder now streams BWT to disk and samples SA/ISA on the fly (no full BWT/SA/ISA in memory).
+- Query-side internals now consume a random-access abstraction (`len` + absolute reads) rather than a concrete paged file reader.
 - Enforced a single trailing `0` sentinel with no internal `0` bytes; multi-doc boundaries use doc offsets only.
 - Index format updated for binary mode (wavelet leaf symbols widened); older indexes must be rebuilt.
 - Wavelet build now supports an auto/hybrid mode that selects streaming when the plan exceeds the memory threshold.

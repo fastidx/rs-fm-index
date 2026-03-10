@@ -1,12 +1,13 @@
-use crate::iolib::paged_reader::PagedReader;
+use crate::iolib::paged_reader::{RandomAccessRead, SharedRandomAccessRead};
 use byteorder::{ByteOrder, LittleEndian};
 use std::io;
 use std::mem::size_of;
+use std::sync::Arc;
 
 /// A read-only view of a Sampled Suffix Array stored on disk.
 /// Accesses are cached via the underlying PagedReader.
 pub struct PagedSampledSA {
-    reader: PagedReader,
+    reader: SharedRandomAccessRead,
     len: usize,        // Number of elements (u64 integers)
     start_offset: u64, // Byte offset in the file where the SA begins
     bits: u8,          // 0 = plain u64, 1..=32 = packed u32 width
@@ -17,7 +18,19 @@ impl PagedSampledSA {
     /// Initialize the view.
     /// `len` is the number of items in the SA (not bytes).
     /// `start_offset` allows this to live inside a larger .idx container file.
-    pub fn new(reader: PagedReader, len: usize, start_offset: u64, bits: u8) -> Self {
+    pub fn new<R>(reader: R, len: usize, start_offset: u64, bits: u8) -> Self
+    where
+        R: RandomAccessRead + 'static,
+    {
+        Self::new_with_shared(Arc::new(reader), len, start_offset, bits)
+    }
+
+    pub fn new_with_shared(
+        reader: SharedRandomAccessRead,
+        len: usize,
+        start_offset: u64,
+        bits: u8,
+    ) -> Self {
         let byte_len = if bits == 0 {
             len as u64 * 8
         } else if bits <= 32 {

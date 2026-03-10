@@ -1,9 +1,10 @@
-use crate::index::encoding::{strategy_for, EncodingMode};
+use crate::index::encoding::{EncodingMode, strategy_for};
 use crate::index::header::ShardHeader;
 use crate::index::sampled_sa::PagedSampledSA;
 use crate::index::wavelet::PagedWaveletTree;
-use crate::iolib::paged_reader::PagedReader;
+use crate::iolib::paged_reader::{PagedReader, RandomAccessRead, SharedRandomAccessRead};
 use std::io;
+use std::sync::Arc;
 
 pub struct QueryEngine {
     header: ShardHeader,
@@ -17,7 +18,18 @@ pub struct QueryEngine {
 
 impl QueryEngine {
     pub fn new(header: ShardHeader, reader: PagedReader) -> Self {
-        let wt = PagedWaveletTree::new(
+        Self::new_with_source(header, reader)
+    }
+
+    pub fn new_with_source<R>(header: ShardHeader, reader: R) -> Self
+    where
+        R: RandomAccessRead + 'static,
+    {
+        Self::new_with_shared_source(header, Arc::new(reader))
+    }
+
+    pub fn new_with_shared_source(header: ShardHeader, reader: SharedRandomAccessRead) -> Self {
+        let wt = PagedWaveletTree::new_with_shared(
             reader.clone(),
             header.tree_shape.clone(),
             header.codes,
@@ -27,7 +39,7 @@ impl QueryEngine {
 
         // Initialize Sampled SA Reader
         let sa_len = (header.text_len as usize).div_ceil(header.sa_sample_rate as usize);
-        let sa = PagedSampledSA::new(
+        let sa = PagedSampledSA::new_with_shared(
             reader.clone(),
             sa_len,
             header.sa_start_offset,
@@ -36,7 +48,7 @@ impl QueryEngine {
 
         // Initialize Sampled ISA Reader
         let isa_len = (header.text_len as usize).div_ceil(header.isa_sample_rate as usize);
-        let isa = PagedSampledSA::new(
+        let isa = PagedSampledSA::new_with_shared(
             reader.clone(),
             isa_len,
             header.isa_start_offset,
@@ -255,8 +267,6 @@ impl QueryEngine {
         let rank = self.wt.rank(c, row)?;
         Ok(c_start + rank)
     }
-
-    
 
     /// Convert a global byte offset to a document id and offset within that doc.
     pub fn pos_to_doc_id(&self, pos: usize) -> Option<(usize, usize)> {
