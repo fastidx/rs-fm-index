@@ -6,11 +6,11 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use crate::index::bitpack;
-use crate::index::encoding::{strategy_for, EncodingMode, ALPHABET_SIZE, SENTINEL};
+use crate::index::encoding::{ALPHABET_SIZE, EncodingMode, SENTINEL, strategy_for};
 use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
 use crate::index::wavelet::{
-    canonical_codes, huffman_lengths, make_wavelet_build_strategy, WaveletBuildMode,
+    WaveletBuildMode, canonical_codes, huffman_lengths, make_wavelet_build_strategy,
 };
 use tempfile::NamedTempFile;
 
@@ -59,7 +59,13 @@ impl ShardBuilder {
 
     /// Consumes a chunk of text and writes a complete .idx file
     pub fn build<P: AsRef<Path>>(&self, text: &[u8], output_path: P) -> io::Result<()> {
-        self.build_with_offsets(text, vec![0], output_path)
+        let file = File::create(output_path)?;
+        self.build_to_writer(text, file)
+    }
+
+    /// Consumes a chunk of text and writes a complete .idx stream.
+    pub fn build_to_writer<W: Write>(&self, text: &[u8], writer: W) -> io::Result<()> {
+        self.build_with_offsets_to_writer(text, vec![0], writer)
     }
 
     /// Consumes concatenated text + document offsets and writes a complete .idx file
@@ -68,6 +74,17 @@ impl ShardBuilder {
         text: &[u8],
         doc_offsets: Vec<u64>,
         output_path: P,
+    ) -> io::Result<()> {
+        let file = File::create(output_path)?;
+        self.build_with_offsets_to_writer(text, doc_offsets, file)
+    }
+
+    /// Consumes concatenated text + document offsets and writes a complete .idx stream.
+    pub fn build_with_offsets_to_writer<W: Write>(
+        &self,
+        text: &[u8],
+        doc_offsets: Vec<u64>,
+        writer: W,
     ) -> io::Result<()> {
         let encoder = strategy_for(self.encoding_mode);
         if self.sample_rate == 0 {
@@ -106,14 +123,14 @@ impl ShardBuilder {
         }
         let encoded = encoder.encode_text(text)?;
 
-        self.build_encoded(&encoded, doc_offsets, output_path)
+        self.build_encoded_to_writer(&encoded, doc_offsets, writer)
     }
 
-    fn build_encoded<P: AsRef<Path>>(
+    fn build_encoded_to_writer<W: Write>(
         &self,
         text: &[u16],
         doc_offsets: Vec<u64>,
-        output_path: P,
+        writer: W,
     ) -> io::Result<()> {
         if text.is_empty() {
             return Err(io::Error::new(
@@ -134,7 +151,7 @@ impl ShardBuilder {
             ));
         }
 
-        let mut writer = std::io::BufWriter::new(File::create(output_path)?);
+        let mut writer = std::io::BufWriter::new(writer);
 
         // 1. Compute Suffix Array (Heavy Computation)
         let sa_source = build_sa_source(text, self.encoding_mode)?;
@@ -172,7 +189,11 @@ impl ShardBuilder {
                             }
                         }
 
-                        let bwt_sym = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                        let bwt_sym = if pos == 0 {
+                            text[len - 1]
+                        } else {
+                            text[pos - 1]
+                        };
                         counts[bwt_sym as usize] += 1;
                         buffer.push(bwt_sym);
 
@@ -198,7 +219,11 @@ impl ShardBuilder {
                             }
                         }
 
-                        let bwt_sym = if pos == 0 { text[len - 1] } else { text[pos - 1] };
+                        let bwt_sym = if pos == 0 {
+                            text[len - 1]
+                        } else {
+                            text[pos - 1]
+                        };
                         counts[bwt_sym as usize] += 1;
                         buffer.push(bwt_sym);
 
@@ -334,10 +359,7 @@ impl ShardBuilder {
         let sa_bytes_len = if sa_bits == 0 {
             sa_len as u64 * 8
         } else if sa_bits <= 32 {
-            sa_packed
-                .as_ref()
-                .map(|v| v.len() as u64 * 4)
-                .unwrap_or(0)
+            sa_packed.as_ref().map(|v| v.len() as u64 * 4).unwrap_or(0)
         } else {
             sa_packed_u64
                 .as_ref()
@@ -348,10 +370,7 @@ impl ShardBuilder {
         let _isa_bytes_len = if isa_bits == 0 {
             isa_len as u64 * 8
         } else if isa_bits <= 32 {
-            isa_packed
-                .as_ref()
-                .map(|v| v.len() as u64 * 4)
-                .unwrap_or(0)
+            isa_packed.as_ref().map(|v| v.len() as u64 * 4).unwrap_or(0)
         } else {
             isa_packed_u64
                 .as_ref()

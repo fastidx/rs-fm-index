@@ -1,12 +1,14 @@
 use crate::index::builder::ShardBuilder;
 use crate::index::encoding::EncodingMode;
-use crate::index::wavelet::WaveletBuildMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
-use crate::iolib::paged_reader::{GlobalPageCache, PagedReader, PagedReaderConfig};
+use crate::index::wavelet::WaveletBuildMode;
+use crate::iolib::paged_reader::{
+    GlobalPageCache, PagedReader, PagedReaderConfig, RandomAccessRead, SharedRandomAccessRead,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,9 +45,20 @@ impl IndexBuilder {
         text: &[u8],
         output_path: P,
     ) -> io::Result<()> {
+        let file = std::fs::File::create(output_path)?;
+        self.build_single_document_to_writer(text, file)
+    }
+
+    /// Build a single-document index to any writer. A trailing sentinel (0 byte) is added.
+    /// In text mode, fails if the input already contains a 0 byte.
+    pub fn build_single_document_to_writer<W: Write>(
+        &self,
+        text: &[u8],
+        writer: W,
+    ) -> io::Result<()> {
         let builder =
             ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
-        builder.build_with_offsets(text, vec![0], output_path)
+        builder.build_with_offsets_to_writer(text, vec![0], writer)
     }
 
     /// Build a multi-document index by concatenating documents and appending a single 0 byte
@@ -55,6 +68,17 @@ impl IndexBuilder {
         &self,
         docs: &[Vec<u8>],
         output_path: P,
+    ) -> io::Result<()> {
+        let file = std::fs::File::create(output_path)?;
+        self.build_multi_documents_to_writer(docs, file)
+    }
+
+    /// Build a multi-document index to any writer by concatenating documents
+    /// and appending a single 0 byte sentinel at the end.
+    pub fn build_multi_documents_to_writer<W: Write>(
+        &self,
+        docs: &[Vec<u8>],
+        writer: W,
     ) -> io::Result<()> {
         if docs.is_empty() {
             return Err(io::Error::new(
@@ -73,7 +97,7 @@ impl IndexBuilder {
 
         let builder =
             ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
-        builder.build_with_offsets(&text, offsets, output_path)
+        builder.build_with_offsets_to_writer(&text, offsets, writer)
     }
 
     /// Build a multi-document index from file paths.
@@ -106,10 +130,21 @@ impl IndexBuilder {
         doc_offsets: &[u64],
         output_path: P,
     ) -> io::Result<()> {
+        let file = std::fs::File::create(output_path)?;
+        self.build_from_concatenated_to_writer(text, doc_offsets, file)
+    }
+
+    /// Build from concatenated text and explicit document offsets to any writer.
+    pub fn build_from_concatenated_to_writer<W: Write>(
+        &self,
+        text: &[u8],
+        doc_offsets: &[u64],
+        writer: W,
+    ) -> io::Result<()> {
         validate_doc_offsets(text.len(), doc_offsets)?;
         let builder =
             ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
-        builder.build_with_offsets(text, doc_offsets.to_vec(), output_path)
+        builder.build_with_offsets_to_writer(text, doc_offsets.to_vec(), writer)
     }
 }
 
@@ -140,6 +175,26 @@ pub struct IndexStats {
 }
 
 impl IndexReader {
+    /// Open an index from any random-access source.
+    pub fn open_with_source<R>(source: R) -> io::Result<Self>
+    where
+        R: RandomAccessRead + 'static,
+    {
+        Self::open_with_shared_source(Arc::new(source))
+    }
+
+    /// Open an index from a shared random-access source.
+    pub fn open_with_shared_source(source: SharedRandomAccessRead) -> io::Result<Self> {
+        let index_bytes = source.len();
+        let header = read_header_from_source(source.as_ref())?;
+        let engine = QueryEngine::new_with_shared_source(header.clone(), source);
+        Ok(Self {
+            header,
+            engine,
+            index_bytes,
+        })
+    }
+
     /// Open an index with a default cache configuration.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         Self::open_with_cache_and_reader_config(
@@ -165,20 +220,9 @@ impl IndexReader {
         reader_config: PagedReaderConfig,
     ) -> io::Result<Self> {
         let path_ref = path.as_ref();
-        let index_bytes = std::fs::metadata(path_ref)?.len();
-        let mut file = std::fs::File::open(path_ref)?;
-        let header: ShardHeader =
-            bincode::serde::decode_from_std_read(&mut file, bincode::config::legacy())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
         let file_id = file_id_for_path(path_ref);
         let reader = PagedReader::new_with_config(path_ref, file_id, cache, reader_config)?;
-        let engine = QueryEngine::new(header.clone(), reader);
-        Ok(Self {
-            header,
-            engine,
-            index_bytes,
-        })
+        Self::open_with_source(reader)
     }
 
     /// Open an index with a custom cache size and shard count.
@@ -203,23 +247,10 @@ impl IndexReader {
         reader_config: PagedReaderConfig,
     ) -> io::Result<Self> {
         let path_ref = path.as_ref();
-        let index_bytes = std::fs::metadata(path_ref)?.len();
-        let mut file = std::fs::File::open(path_ref)?;
-        let header: ShardHeader =
-            bincode::serde::decode_from_std_read(&mut file, bincode::config::legacy())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
         let cache = Arc::new(GlobalPageCache::new(cache_bytes, cache_shards));
-
         let file_id = file_id_for_path(path_ref);
-
         let reader = PagedReader::new_with_config(path_ref, file_id, cache, reader_config)?;
-        let engine = QueryEngine::new(header.clone(), reader);
-        Ok(Self {
-            header,
-            engine,
-            index_bytes,
-        })
+        Self::open_with_source(reader)
     }
 
     pub fn header(&self) -> &ShardHeader {
@@ -324,6 +355,42 @@ fn file_id_for_path(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
     hasher.finish()
+}
+
+struct RandomAccessCursor<'a> {
+    source: &'a dyn RandomAccessRead,
+    pos: u64,
+    len: u64,
+}
+
+impl<'a> RandomAccessCursor<'a> {
+    fn new(source: &'a dyn RandomAccessRead) -> Self {
+        Self {
+            source,
+            pos: 0,
+            len: source.len(),
+        }
+    }
+}
+
+impl Read for RandomAccessCursor<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || self.pos >= self.len {
+            return Ok(0);
+        }
+
+        let remaining = self.len - self.pos;
+        let to_read = buf.len().min(remaining.min(usize::MAX as u64) as usize);
+        self.source.read_exact_at(self.pos, &mut buf[..to_read])?;
+        self.pos += to_read as u64;
+        Ok(to_read)
+    }
+}
+
+fn read_header_from_source(source: &dyn RandomAccessRead) -> io::Result<ShardHeader> {
+    let mut cursor = RandomAccessCursor::new(source);
+    bincode::serde::decode_from_std_read(&mut cursor, bincode::config::legacy())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn validate_doc_offsets(text_len: usize, offsets: &[u64]) -> io::Result<()> {

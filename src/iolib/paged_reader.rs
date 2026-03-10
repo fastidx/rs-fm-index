@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::cache::sharded_fifo::ShardedFastS3Fifo;
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{Sender, bounded};
 
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 const PREFETCH_QUEUE_LEN: usize = 64;
@@ -14,6 +14,33 @@ const PREFETCH_QUEUE_LEN: usize = 64;
 /// A global cache shared across all readers.
 /// Key: (FileID, PageSize, PageIndex), Value: Page Data
 pub type GlobalPageCache = ShardedFastS3Fifo<(u64, u32, u64), Vec<u8>>;
+
+/// Random-access source abstraction used by query-side readers.
+///
+/// This intentionally models absolute offset reads plus a stable length instead
+/// of cursor-based `Read + Seek`, which avoids shared mutable cursor state.
+pub trait RandomAccessRead: Send + Sync {
+    fn len(&self) -> u64;
+
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+
+    fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset overflow"))?;
+        if end > self.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Read past EOF",
+            ));
+        }
+        let mut out = vec![0u8; len];
+        self.read_exact_at(offset, &mut out)?;
+        Ok(out)
+    }
+}
+
+pub type SharedRandomAccessRead = Arc<dyn RandomAccessRead>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefetchMode {
@@ -72,8 +99,7 @@ impl PagedReader {
         let file_len = file.metadata()?.len();
         let file = Arc::new(file);
 
-        let prefetcher = if config.prefetch_mode == PrefetchMode::Async
-            && config.prefetch_pages > 0
+        let prefetcher = if config.prefetch_mode == PrefetchMode::Async && config.prefetch_pages > 0
         {
             let ctx = PrefetchContext {
                 file: file.clone(),
@@ -107,10 +133,17 @@ impl PagedReader {
         Self::new_with_config(path, file_id, cache, PagedReaderConfig::default())
     }
 
+    pub fn len(&self) -> u64 {
+        self.file_len
+    }
+
     /// Read bytes at a specific offset using the S3-FIFO cache.
     /// Handles reads that span across multiple pages.
     pub fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        if offset + len as u64 > self.file_len {
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset overflow"))?;
+        if end > self.file_len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Read past EOF",
@@ -170,9 +203,10 @@ impl PagedReader {
                 self.read_pages_into_cache(page_idx, 1)?;
                 if self.prefetch_pages > 0 {
                     if let Some(worker) = &self.prefetcher {
-                        let _ = worker
-                            .tx
-                            .try_send(PrefetchRequest { page_idx: page_idx + 1, pages: self.prefetch_pages });
+                        let _ = worker.tx.try_send(PrefetchRequest {
+                            page_idx: page_idx + 1,
+                            pages: self.prefetch_pages,
+                        });
                     }
                 }
             }
@@ -193,21 +227,6 @@ impl PagedReader {
         (self.file_id, self.page_size as u32, page_idx)
     }
 
-    fn read_at_fully(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        let mut read = 0usize;
-        while read < buf.len() {
-            let n = self.file.read_at(&mut buf[read..], offset + read as u64)?;
-            if n == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Read past EOF",
-                ));
-            }
-            read += n;
-        }
-        Ok(())
-    }
-
     fn read_pages_into_cache(&self, page_idx: u64, pages: usize) -> io::Result<()> {
         let ctx = PrefetchContext {
             file: self.file.clone(),
@@ -217,6 +236,31 @@ impl PagedReader {
             page_size: self.page_size,
         };
         ctx.read_pages_into_cache(page_idx, pages)
+    }
+}
+
+impl RandomAccessRead for PagedReader {
+    fn len(&self) -> u64 {
+        self.file_len
+    }
+
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset overflow"))?;
+        if end > self.file_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Read past EOF",
+            ));
+        }
+        let bytes = self.read_at(offset, buf.len())?;
+        buf.copy_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        PagedReader::read_at(self, offset, len)
     }
 }
 
@@ -282,10 +326,7 @@ impl PrefetchContext {
         let remaining_bytes = self.file_len - page_start;
         let max_pages = (remaining_bytes + page_size - 1) / page_size;
         let pages_to_read = std::cmp::min(pages as u64, max_pages) as usize;
-        let total_bytes = std::cmp::min(
-            remaining_bytes,
-            pages_to_read as u64 * page_size,
-        ) as usize;
+        let total_bytes = std::cmp::min(remaining_bytes, pages_to_read as u64 * page_size) as usize;
 
         let mut buffer = vec![0u8; total_bytes];
         self.read_at_fully(page_start, &mut buffer)?;
@@ -412,9 +453,6 @@ mod tests {
         let start = (page_size - 5) as u64;
         let len = 20;
         let read_data = reader.read_at(start, len).unwrap();
-        assert_eq!(
-            read_data,
-            &data[(start as usize)..(start as usize + len)]
-        );
+        assert_eq!(read_data, &data[(start as usize)..(start as usize + len)]);
     }
 }

@@ -1,12 +1,13 @@
-use crate::iolib::paged_reader::PagedReader;
 use crate::index::encoding::ALPHABET_SIZE;
+use crate::iolib::paged_reader::{RandomAccessRead, SharedRandomAccessRead};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
-use tempfile::{tempfile, NamedTempFile};
+use std::sync::Arc;
+use tempfile::{NamedTempFile, tempfile};
 
 // --- Constants ---
 const PAGE_SIZE: usize = 4096;
@@ -51,13 +52,24 @@ pub(crate) trait WaveletBuildStrategy {
 // =================================================================================
 
 pub struct PagedBitVector {
-    reader: PagedReader,
+    reader: SharedRandomAccessRead,
     start_offset: u64,
     len_bits: usize,
 }
 
 impl PagedBitVector {
-    pub fn new(reader: PagedReader, start_offset: u64, len_bits: usize) -> Self {
+    pub fn new<R>(reader: R, start_offset: u64, len_bits: usize) -> Self
+    where
+        R: RandomAccessRead + 'static,
+    {
+        Self::new_with_shared(Arc::new(reader), start_offset, len_bits)
+    }
+
+    pub fn new_with_shared(
+        reader: SharedRandomAccessRead,
+        start_offset: u64,
+        len_bits: usize,
+    ) -> Self {
         Self {
             reader,
             start_offset,
@@ -208,11 +220,7 @@ pub fn canonical_codes(lens: &[u8; ALPHABET_SIZE]) -> [Option<HuffmanCode>; ALPH
     let mut syms: Vec<(u16, u8)> = (0..ALPHABET_SIZE)
         .filter_map(|s| {
             let l = lens[s as usize];
-            if l > 0 {
-                Some((s as u16, l))
-            } else {
-                None
-            }
+            if l > 0 { Some((s as u16, l)) } else { None }
         })
         .collect();
     syms.sort_by_key(|&(s, l)| (l, s));
@@ -439,20 +447,18 @@ impl WaveletTreeBuilder {
         let mut current_byte = 0u8;
         let mut bit_in_byte = 0u8;
 
-        let push_bit = |bit: bool,
-                        packed_data: &mut Vec<u8>,
-                        current_byte: &mut u8,
-                        bit_in_byte: &mut u8| {
-            if bit {
-                *current_byte |= 1 << *bit_in_byte;
-            }
-            *bit_in_byte += 1;
-            if *bit_in_byte == 8 {
-                packed_data.push(*current_byte);
-                *current_byte = 0;
-                *bit_in_byte = 0;
-            }
-        };
+        let push_bit =
+            |bit: bool, packed_data: &mut Vec<u8>, current_byte: &mut u8, bit_in_byte: &mut u8| {
+                if bit {
+                    *current_byte |= 1 << *bit_in_byte;
+                }
+                *bit_in_byte += 1;
+                if *bit_in_byte == 8 {
+                    packed_data.push(*current_byte);
+                    *current_byte = 0;
+                    *bit_in_byte = 0;
+                }
+            };
 
         for (i, node) in self.nodes.iter().enumerate() {
             match node {
@@ -517,7 +523,11 @@ fn build_nodes(codes: &[Option<HuffmanCode>; ALPHABET_SIZE]) -> Vec<BuilderNode>
 
                 let next_child_idx = match nodes[curr_idx] {
                     BuilderNode::Internal { left, right } => {
-                        if bit == 0 { left } else { right }
+                        if bit == 0 {
+                            left
+                        } else {
+                            right
+                        }
                     }
                     BuilderNode::Leaf(_) => panic!("Invalid prefix code: path collision"),
                 };
@@ -923,8 +933,21 @@ pub struct PagedWaveletTree {
 }
 
 impl PagedWaveletTree {
-    pub fn new(
-        reader: PagedReader,
+    pub fn new<R>(
+        reader: R,
+        nodes: Vec<WaveletNodeShape>,
+        codes: [Option<HuffmanCode>; ALPHABET_SIZE],
+        text_len: usize,
+        wt_start_offset: u64,
+    ) -> Self
+    where
+        R: RandomAccessRead + 'static,
+    {
+        Self::new_with_shared(Arc::new(reader), nodes, codes, text_len, wt_start_offset)
+    }
+
+    pub fn new_with_shared(
+        reader: SharedRandomAccessRead,
         nodes: Vec<WaveletNodeShape>,
         codes: [Option<HuffmanCode>; ALPHABET_SIZE],
         text_len: usize,
@@ -933,13 +956,15 @@ impl PagedWaveletTree {
         let total_bits = nodes
             .iter()
             .map(|n| match n {
-                WaveletNodeShape::Internal { bit_start, bit_len, .. } => bit_start + bit_len,
+                WaveletNodeShape::Internal {
+                    bit_start, bit_len, ..
+                } => bit_start + bit_len,
                 _ => 0,
             })
             .max()
             .unwrap_or(0);
 
-        let global_bv = PagedBitVector::new(reader, wt_start_offset, total_bits);
+        let global_bv = PagedBitVector::new_with_shared(reader, wt_start_offset, total_bits);
         Self {
             global_bv,
             nodes,
@@ -1046,6 +1071,7 @@ impl PagedWaveletTree {
 mod tests {
     use super::*;
     use crate::cache::sharded_fifo::ShardedFastS3Fifo;
+    use crate::iolib::paged_reader::PagedReader;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
@@ -1131,7 +1157,7 @@ mod tests {
 mod comprehensive_tests {
     use super::*;
     use crate::cache::sharded_fifo::ShardedFastS3Fifo;
-    use crate::iolib::paged_reader::GlobalPageCache;
+    use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
     use std::sync::Arc;
