@@ -1,4 +1,5 @@
 use crate::index::encoding::ALPHABET_SIZE;
+use crate::index::scratch;
 use crate::iolib::paged_reader::{RandomAccessRead, SharedRandomAccessRead};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tempfile::{NamedTempFile, tempfile};
+use tempfile::NamedTempFile;
 
 // --- Constants ---
 const PAGE_SIZE: usize = 4096;
@@ -566,9 +568,9 @@ struct NodeBitWriter {
 }
 
 impl NodeBitWriter {
-    fn new() -> io::Result<Self> {
+    fn new(scratch_dir: Option<&Path>) -> io::Result<Self> {
         Ok(Self {
-            writer: BufWriter::new(tempfile()?),
+            writer: BufWriter::new(scratch::temp_file(scratch_dir)?),
             current_byte: 0,
             bit_in_byte: 0,
             bits_written: 0,
@@ -643,6 +645,7 @@ struct StreamingWaveletBuild {
     codes: [Option<HuffmanCode>; ALPHABET_SIZE],
     plan: WaveletStreamPlan,
     wavelet_bytes: u64,
+    scratch_dir: Option<PathBuf>,
 }
 
 impl WaveletBuildStrategy for StreamingWaveletBuild {
@@ -657,7 +660,13 @@ impl WaveletBuildStrategy for StreamingWaveletBuild {
     fn write_to(&self, bwt_file: &NamedTempFile, writer: &mut dyn Write) -> io::Result<()> {
         let bwt_read = bwt_file.reopen()?;
         let bwt_reader = BufReader::new(bwt_read);
-        write_wavelet_stream_from_bwt(bwt_reader, &self.codes, &self.plan, writer)
+        write_wavelet_stream_from_bwt_with_scratch(
+            bwt_reader,
+            &self.codes,
+            &self.plan,
+            writer,
+            self.scratch_dir.as_deref(),
+        )
     }
 }
 
@@ -666,9 +675,11 @@ pub(crate) fn make_wavelet_build_strategy(
     codes: [Option<HuffmanCode>; ALPHABET_SIZE],
     counts: &[u64; ALPHABET_SIZE],
     bwt_file: &NamedTempFile,
+    scratch_dir: Option<&Path>,
 ) -> io::Result<Box<dyn WaveletBuildStrategy>> {
     let plan = plan_wavelet_stream(&codes, counts);
     let total_bits = plan.total_bits();
+    let resolved_scratch_dir = scratch::resolve_scratch_dir(scratch_dir);
     let resolved = match mode {
         WaveletBuildMode::Auto { max_bytes } => {
             if total_bits > max_bytes {
@@ -690,6 +701,7 @@ pub(crate) fn make_wavelet_build_strategy(
                 codes,
                 plan,
                 wavelet_bytes,
+                scratch_dir: resolved_scratch_dir,
             }))
         }
         WaveletBuildMode::Auto { .. } => unreachable!(),
@@ -807,15 +819,27 @@ impl<'a> PagedBitWriter<'a> {
 
 #[doc(hidden)]
 pub fn write_wavelet_stream_from_bwt<R: Read>(
-    mut reader: R,
+    reader: R,
     codes: &[Option<HuffmanCode>; ALPHABET_SIZE],
     plan: &WaveletStreamPlan,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
+    write_wavelet_stream_from_bwt_with_scratch(reader, codes, plan, writer, None)
+}
+
+pub(crate) fn write_wavelet_stream_from_bwt_with_scratch<R: Read>(
+    mut reader: R,
+    codes: &[Option<HuffmanCode>; ALPHABET_SIZE],
+    plan: &WaveletStreamPlan,
+    writer: &mut dyn Write,
+    scratch_dir: Option<&Path>,
+) -> io::Result<()> {
     let mut node_writers: Vec<Option<NodeBitWriter>> = Vec::with_capacity(plan.nodes.len());
     for node in &plan.nodes {
         match node {
-            BuilderNode::Internal { .. } => node_writers.push(Some(NodeBitWriter::new()?)),
+            BuilderNode::Internal { .. } => {
+                node_writers.push(Some(NodeBitWriter::new(scratch_dir)?))
+            }
             BuilderNode::Leaf(_) => node_writers.push(None),
         }
     }

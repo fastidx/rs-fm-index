@@ -65,6 +65,7 @@ chunk_size = "1GiB"
 read_buffer = "8MiB"
 num_workers = 8
 sample_rate = 32
+scratch_dir = "/mnt/nvme/fm_scratch"
 ```
 
 Run:
@@ -144,6 +145,35 @@ use rust_fm_index::{IndexBuilder, WaveletBuildMode};
 let builder = IndexBuilder::new(32)
     .with_wavelet_mode(WaveletBuildMode::Auto { max_bytes: 256 * 1024 * 1024 });
 builder.build_single_document(b"hello world", "index.idx")?;
+```
+
+### Scratch directory for temp build files
+
+Use a custom scratch directory for BWT/wavelet/external-SA temp files:
+
+```bash
+cargo run --release -- build --scratch-dir /mnt/nvme/fm_scratch ./input.txt ./index.idx
+```
+
+`ingest` supports the same flag and config key:
+
+```toml
+scratch_dir = "/mnt/nvme/fm_scratch"
+```
+
+Library usage:
+
+```rust
+use rust_fm_index::IndexBuilder;
+
+let builder = IndexBuilder::new(32).with_scratch_dir("/mnt/nvme/fm_scratch");
+builder.build_single_document(b"hello world", "index.idx")?;
+```
+
+Operational override (when flags/API are not convenient):
+
+```bash
+export FM_INDEX_SCRATCH_DIR=/mnt/nvme/fm_scratch
 ```
 
 ### Doc-safe queries

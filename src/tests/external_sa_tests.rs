@@ -6,11 +6,7 @@ use rand::{RngExt, SeedableRng};
 fn assert_sa_matches(text: &[u8], mem_limit: usize) {
     let text_u16: Vec<u16> = text.iter().map(|&b| b as u16).collect();
     let sa_stream = external_sa::build_sa_external(&text_u16, mem_limit).unwrap();
-    let sa_ext: Vec<u64> = sa_stream
-        .iter()
-        .unwrap()
-        .map(|v| v.unwrap())
-        .collect();
+    let sa_ext: Vec<u64> = sa_stream.iter().unwrap().map(|v| v.unwrap()).collect();
 
     let (_, sa_ref) = div_sort(text).into_parts();
     let sa_ref: Vec<u64> = sa_ref.iter().map(|&v| v as u64).collect();

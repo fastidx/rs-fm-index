@@ -1,10 +1,10 @@
+use crate::IndexReader;
 use crate::api::IndexStats;
 use crate::index::builder::ShardBuilder;
 use crate::index::encoding::EncodingMode;
 use crate::index::wavelet::WaveletBuildMode;
-use crate::IndexReader;
 use anyhow::{Context, Result};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use glob::glob;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use std::thread;
 pub struct IngestConfig {
     pub input_patterns: Vec<String>,
     pub output_dir: PathBuf,
+    pub scratch_dir: Option<PathBuf>,
     pub chunk_size: usize,
     pub read_buffer: usize,
     pub num_workers: usize,
@@ -142,6 +143,7 @@ impl Orchestrator {
     ) -> Vec<thread::JoinHandle<()>> {
         let mut handles = Vec::new();
         let output_dir = self.config.output_dir.clone();
+        let scratch_dir = self.config.scratch_dir.clone();
         let sample_rate = self.config.sample_rate;
         let encoding_mode = self.config.encoding_mode;
         let wavelet_mode = self.config.wavelet_mode;
@@ -149,6 +151,7 @@ impl Orchestrator {
         for id in 0..self.config.num_workers {
             let rx = rx.clone();
             let output_dir = output_dir.clone();
+            let scratch_dir = scratch_dir.clone();
             let pb = m.add(ProgressBar::new(0));
             pb.set_style(
                 ProgressStyle::default_bar()
@@ -167,6 +170,11 @@ impl Orchestrator {
 
                     let builder =
                         ShardBuilder::new_with_modes(sample_rate, encoding_mode, wavelet_mode);
+                    let builder = if let Some(dir) = scratch_dir.as_deref() {
+                        builder.with_scratch_dir(dir)
+                    } else {
+                        builder
+                    };
                     if let Err(e) =
                         builder.build_with_offsets(&job.data, job.doc_offsets.clone(), &shard_path)
                     {
@@ -241,7 +249,10 @@ impl Orchestrator {
         paths.sort();
 
         for path in paths {
-            pb.set_message(format!("Processing {:?}", path.file_name().unwrap_or_default()));
+            pb.set_message(format!(
+                "Processing {:?}",
+                path.file_name().unwrap_or_default()
+            ));
             let file_size = std::fs::metadata(&path)?.len() as u64;
             total_input_bytes += file_size;
 
@@ -360,7 +371,8 @@ impl Orchestrator {
     fn collect_paths(&self) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
         for pattern in &self.config.input_patterns {
-            let entries = glob(pattern).with_context(|| format!("Invalid glob pattern: {}", pattern))?;
+            let entries =
+                glob(pattern).with_context(|| format!("Invalid glob pattern: {}", pattern))?;
             for entry in entries {
                 match entry {
                     Ok(path) if path.is_file() => paths.push(path),

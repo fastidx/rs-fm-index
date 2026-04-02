@@ -3,7 +3,9 @@ use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::mem::size_of;
+use std::path::Path;
 
+use crate::index::scratch;
 use tempfile::NamedTempFile;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +94,14 @@ impl Iterator for SaFileIter {
 }
 
 pub fn build_sa_external(text: &[u16], mem_limit_bytes: usize) -> io::Result<SaStream> {
+    build_sa_external_with_scratch(text, mem_limit_bytes, None)
+}
+
+pub fn build_sa_external_with_scratch(
+    text: &[u16],
+    mem_limit_bytes: usize,
+    scratch_dir: Option<&Path>,
+) -> io::Result<SaStream> {
     let n = text.len();
     if n == 0 {
         return Err(io::Error::new(
@@ -111,11 +121,14 @@ pub fn build_sa_external(text: &[u16], mem_limit_bytes: usize) -> io::Result<SaS
     let mut step = 1usize;
 
     loop {
-        let runs = build_runs(&rank, step, chunk_len)?;
-        let (new_rank, rank_count, sa_file) = merge_runs(runs, n)?;
+        let runs = build_runs(&rank, step, chunk_len, scratch_dir)?;
+        let (new_rank, rank_count, sa_file) = merge_runs(runs, n, scratch_dir)?;
 
         if rank_count == n {
-            return Ok(SaStream { file: sa_file, len: n });
+            return Ok(SaStream {
+                file: sa_file,
+                len: n,
+            });
         }
 
         rank = new_rank;
@@ -123,12 +136,20 @@ pub fn build_sa_external(text: &[u16], mem_limit_bytes: usize) -> io::Result<SaS
 
         if step >= n {
             // Fallback: return last SA order if we fail to reach unique ranks.
-            return Ok(SaStream { file: sa_file, len: n });
+            return Ok(SaStream {
+                file: sa_file,
+                len: n,
+            });
         }
     }
 }
 
-fn build_runs(rank: &[u64], step: usize, chunk_len: usize) -> io::Result<Vec<NamedTempFile>> {
+fn build_runs(
+    rank: &[u64],
+    step: usize,
+    chunk_len: usize,
+    scratch_dir: Option<&Path>,
+) -> io::Result<Vec<NamedTempFile>> {
     let n = rank.len();
     let mut runs = Vec::new();
     let mut start = 0usize;
@@ -148,7 +169,7 @@ fn build_runs(rank: &[u64], step: usize, chunk_len: usize) -> io::Result<Vec<Nam
         }
 
         tuples.sort_unstable();
-        let run_file = write_run(&tuples)?;
+        let run_file = write_run(&tuples, scratch_dir)?;
         runs.push(run_file);
 
         start = end;
@@ -157,8 +178,8 @@ fn build_runs(rank: &[u64], step: usize, chunk_len: usize) -> io::Result<Vec<Nam
     Ok(runs)
 }
 
-fn write_run(tuples: &[Tuple]) -> io::Result<NamedTempFile> {
-    let mut file = NamedTempFile::new()?;
+fn write_run(tuples: &[Tuple], scratch_dir: Option<&Path>) -> io::Result<NamedTempFile> {
+    let mut file = scratch::named_temp_file(scratch_dir)?;
     {
         let mut writer = BufWriter::new(file.as_file_mut());
         for t in tuples {
@@ -200,6 +221,7 @@ impl RunReader {
 fn merge_runs(
     runs: Vec<NamedTempFile>,
     n: usize,
+    scratch_dir: Option<&Path>,
 ) -> io::Result<(Vec<u64>, usize, NamedTempFile)> {
     let mut readers: Vec<RunReader> = Vec::with_capacity(runs.len());
     for run in &runs {
@@ -217,7 +239,7 @@ fn merge_runs(
     let mut rank_count = 0usize;
     let mut prev_key: Option<(u64, u64)> = None;
 
-    let mut sa_file = NamedTempFile::new()?;
+    let mut sa_file = scratch::named_temp_file(scratch_dir)?;
     {
         let mut sa_writer = BufWriter::new(sa_file.as_file_mut());
         while let Some(std::cmp::Reverse(item)) = heap.pop() {

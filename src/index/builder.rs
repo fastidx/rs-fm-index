@@ -3,21 +3,22 @@ use cdivsufsort::sort as div_sort; // Using the cdivsufsort crate
 use std::env;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::index::bitpack;
 use crate::index::encoding::{ALPHABET_SIZE, EncodingMode, SENTINEL, strategy_for};
 use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
+use crate::index::scratch;
 use crate::index::wavelet::{
     WaveletBuildMode, canonical_codes, huffman_lengths, make_wavelet_build_strategy,
 };
-use tempfile::NamedTempFile;
 
 pub struct ShardBuilder {
     sample_rate: u32,
     encoding_mode: EncodingMode,
     wavelet_mode: WaveletBuildMode,
+    scratch_dir: Option<PathBuf>,
 }
 
 const EXTERNAL_SA_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
@@ -34,6 +35,7 @@ impl ShardBuilder {
             sample_rate,
             encoding_mode: EncodingMode::Text,
             wavelet_mode: WaveletBuildMode::default(),
+            scratch_dir: None,
         }
     }
 
@@ -42,6 +44,7 @@ impl ShardBuilder {
             sample_rate,
             encoding_mode,
             wavelet_mode: WaveletBuildMode::default(),
+            scratch_dir: None,
         }
     }
 
@@ -54,7 +57,13 @@ impl ShardBuilder {
             sample_rate,
             encoding_mode,
             wavelet_mode,
+            scratch_dir: None,
         }
+    }
+
+    pub fn with_scratch_dir<P: AsRef<Path>>(mut self, scratch_dir: P) -> Self {
+        self.scratch_dir = Some(scratch_dir.as_ref().to_path_buf());
+        self
     }
 
     /// Consumes a chunk of text and writes a complete .idx file
@@ -154,7 +163,7 @@ impl ShardBuilder {
         let mut writer = std::io::BufWriter::new(writer);
 
         // 1. Compute Suffix Array (Heavy Computation)
-        let sa_source = build_sa_source(text, self.encoding_mode)?;
+        let sa_source = build_sa_source(text, self.encoding_mode, self.scratch_dir.as_deref())?;
 
         // 2. Build BWT + samples using an external-memory pipeline
         // BWT[i] = Text[SA[i] - 1] (cyclic)
@@ -169,7 +178,7 @@ impl ShardBuilder {
         let mut isa_samples: Vec<u64> = vec![0u64; isa_len];
 
         let mut counts = [0u64; ALPHABET_SIZE];
-        let mut bwt_file = NamedTempFile::new()?;
+        let mut bwt_file = scratch::named_temp_file(self.scratch_dir.as_deref())?;
         {
             let mut writer = BufWriter::new(bwt_file.as_file_mut());
             let mut buffer: Vec<u16> = Vec::with_capacity(4 * 1024 * 1024);
@@ -264,8 +273,13 @@ impl ShardBuilder {
         let lens = huffman_lengths(&counts);
         let codes = canonical_codes(&lens);
         let codes_for_header = codes;
-        let wavelet_strategy =
-            make_wavelet_build_strategy(self.wavelet_mode, codes, &counts, &bwt_file)?;
+        let wavelet_strategy = make_wavelet_build_strategy(
+            self.wavelet_mode,
+            codes,
+            &counts,
+            &bwt_file,
+            self.scratch_dir.as_deref(),
+        )?;
         let tree_shape = wavelet_strategy.tree_shape().to_vec();
         let wavelet_bytes = wavelet_strategy.wavelet_bytes();
 
@@ -447,10 +461,14 @@ impl ShardBuilder {
     }
 }
 
-fn build_sa_source(text: &[u16], encoding_mode: EncodingMode) -> io::Result<SaSource> {
+fn build_sa_source(
+    text: &[u16],
+    encoding_mode: EncodingMode,
+    scratch_dir: Option<&Path>,
+) -> io::Result<SaSource> {
     if encoding_mode == EncodingMode::Binary || should_use_external_sa(text.len()) {
         let mem_limit = external_sa_mem_limit();
-        let stream = external_sa::build_sa_external(text, mem_limit)?;
+        let stream = external_sa::build_sa_external_with_scratch(text, mem_limit, scratch_dir)?;
         return Ok(SaSource::External(stream));
     }
 

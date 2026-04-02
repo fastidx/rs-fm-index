@@ -75,6 +75,7 @@ chunk_size = "1GiB"
 read_buffer = "8MiB"
 num_workers = 8
 sample_rate = 32
+scratch_dir = "/mnt/nvme/fm_scratch"
 ```
 
 Run:
@@ -127,6 +128,13 @@ cargo run --release -- build --wavelet-mode in-memory ./input.txt ./index.idx
 cargo run --release -- build --wavelet-mode streaming ./input.txt ./index.idx
 ```
 
+Scratch directory for temporary build files:
+
+```
+cargo run --release -- build --scratch-dir /mnt/nvme/fm_scratch ./input.txt ./index.idx
+cargo run --release -- ingest --scratch-dir /mnt/nvme/fm_scratch --input "data/**/*.txt" --output ./shards
+```
+
 ---
 
 ## Library Usage
@@ -169,6 +177,15 @@ let docs = vec![
 
 let builder = IndexBuilder::new(32);
 builder.build_multi_documents(&docs, "index.idx")?;
+```
+
+### Build with a custom scratch directory
+
+```rust
+use rust_fm_index::IndexBuilder;
+
+let builder = IndexBuilder::new(32).with_scratch_dir("/mnt/nvme/fm_scratch");
+builder.build_single_document(b"hello world", "index.idx")?;
 ```
 
 ### Query the index
@@ -316,6 +333,12 @@ global offsets to document IDs.
   - `in-memory`: fastest, but uses more RAM.
   - `streaming`: lowest RAM, slower.
   - `auto` (default): uses `in-memory` if the plan fits under 256MiB, otherwise `streaming`.
+
+- **Scratch directory** for temp files can be set with:
+  - CLI: `--scratch-dir /path/to/dir`
+  - Config file (`ingest`): `scratch_dir = "/path/to/dir"`
+  - Library: `IndexBuilder::with_scratch_dir(...)`
+  - Env override: `FM_INDEX_SCRATCH_DIR=/path/to/dir`
 
 - **Cache size** can be customized with:
   ```rust
