@@ -65,3 +65,17 @@ fn test_open_with_shared_source_roundtrip() {
     let (sp, ep) = reader.count(b"issi").unwrap();
     assert_eq!(ep - sp + 1, 2);
 }
+
+#[test]
+fn test_builder_invalid_scratch_dir_fails() {
+    let base = tempfile::TempDir::new().unwrap();
+    let missing = base.path().join("missing-scratch-dir");
+
+    let builder = IndexBuilder::new(4).with_scratch_dir(&missing);
+    let mut index_bytes = Vec::new();
+    let err = builder
+        .build_single_document_to_writer(b"banana", &mut index_bytes)
+        .unwrap_err();
+
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}

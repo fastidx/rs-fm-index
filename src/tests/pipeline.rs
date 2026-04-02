@@ -1,6 +1,6 @@
 use crate::index::builder::ShardBuilder;
-use crate::index::encoding::{EncodingMode, ALPHABET_SIZE};
-use crate::index::header::{ShardHeader, CURRENT_VERSION, MAGIC_BYTES};
+use crate::index::encoding::{ALPHABET_SIZE, EncodingMode};
+use crate::index::header::{CURRENT_VERSION, MAGIC_BYTES, ShardHeader};
 use crate::index::sampled_sa::PagedSampledSA;
 use crate::index::wavelet::{HuffmanCode, PagedWaveletTree, WaveletNodeShape};
 use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
@@ -111,13 +111,22 @@ fn test_builder_offsets_and_lengths() {
     assert_eq!(header.magic, MAGIC_BYTES);
     assert_eq!(header.version, CURRENT_VERSION);
 
-    let header_size =
-        bincode::serde::encode_to_vec(&header, bincode::config::legacy()).unwrap().len() as u64;
+    let header_size = bincode::serde::encode_to_vec(&header, bincode::config::legacy())
+        .unwrap()
+        .len() as u64;
     assert_eq!(header.wt_start_offset, header_size);
 
     let file_len = std::fs::metadata(tmp_file.path()).unwrap().len();
-    let sa_bits = if header.sa_bits == 0 { 64 } else { header.sa_bits as u64 };
-    let isa_bits = if header.isa_bits == 0 { 64 } else { header.isa_bits as u64 };
+    let sa_bits = if header.sa_bits == 0 {
+        64
+    } else {
+        header.sa_bits as u64
+    };
+    let isa_bits = if header.isa_bits == 0 {
+        64
+    } else {
+        header.isa_bits as u64
+    };
     let sa_word_bits = if header.sa_bits == 0 {
         64
     } else if header.sa_bits <= 32 {
@@ -133,15 +142,17 @@ fn test_builder_offsets_and_lengths() {
         64
     } as u64;
     let indexed_len = text.len() + 1;
-    let sa_words =
-        ((sample_count(indexed_len, sample_rate) as u64 * sa_bits) + sa_word_bits - 1)
-            / sa_word_bits;
+    let sa_words = ((sample_count(indexed_len, sample_rate) as u64 * sa_bits) + sa_word_bits - 1)
+        / sa_word_bits;
     let isa_words =
         ((sample_count(indexed_len, header.isa_sample_rate) as u64 * isa_bits) + isa_word_bits - 1)
             / isa_word_bits;
     let expected_sa_bytes = sa_words * (sa_word_bits / 8);
     let expected_isa_bytes = isa_words * (isa_word_bits / 8);
-    assert_eq!(header.isa_start_offset, header.sa_start_offset + expected_sa_bytes);
+    assert_eq!(
+        header.isa_start_offset,
+        header.sa_start_offset + expected_sa_bytes
+    );
     assert_eq!(header.isa_start_offset + expected_isa_bytes, file_len);
 }
 
@@ -286,6 +297,7 @@ fn test_orchestrator_chunking() {
     let config = IngestConfig {
         input_patterns: vec![input_dir.path().join("*.txt").to_string_lossy().to_string()],
         output_dir: output_dir.path().to_path_buf(),
+        scratch_dir: None,
         chunk_size: 150,
         read_buffer: 64,
         num_workers: 2,
@@ -304,7 +316,11 @@ fn test_orchestrator_chunking() {
         .to_string();
     let shards: Vec<_> = glob::glob(&pattern).unwrap().map(|x| x.unwrap()).collect();
 
-    assert!(shards.len() >= 2, "Expected multiple shards, got {}", shards.len());
+    assert!(
+        shards.len() >= 2,
+        "Expected multiple shards, got {}",
+        shards.len()
+    );
 
     let stats_pattern = output_dir
         .path()
@@ -337,6 +353,7 @@ fn test_orchestrator_oversized_split_metadata() {
     let config = IngestConfig {
         input_patterns: vec![input_dir.path().join("*.txt").to_string_lossy().to_string()],
         output_dir: output_dir.path().to_path_buf(),
+        scratch_dir: None,
         chunk_size: 150,
         read_buffer: 64,
         num_workers: 2,
@@ -381,8 +398,8 @@ fn test_orchestrator_oversized_split_metadata() {
 
 #[test]
 fn test_multishard_merge_cross_boundary() {
-    use crate::ingest::orchestrator::{IngestConfig, Orchestrator};
     use crate::MultiShardReader;
+    use crate::ingest::orchestrator::{IngestConfig, Orchestrator};
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -395,6 +412,7 @@ fn test_multishard_merge_cross_boundary() {
     let config = IngestConfig {
         input_patterns: vec![input_dir.path().join("*.txt").to_string_lossy().to_string()],
         output_dir: output_dir.path().to_path_buf(),
+        scratch_dir: None,
         chunk_size: 8,
         read_buffer: 4,
         num_workers: 1,
@@ -421,7 +439,7 @@ fn test_multishard_merge_cross_boundary() {
 
 #[test]
 fn test_ingest_config_parse() {
-    use crate::ingest::config::{size_value_to_usize, IngestConfigFile};
+    use crate::ingest::config::{IngestConfigFile, size_value_to_usize};
     use tempfile::Builder;
 
     let toml = r#"
@@ -431,6 +449,7 @@ chunk_size = "64MiB"
 read_buffer = 1048576
 num_workers = 8
 sample_rate = 64
+scratch_dir = "scratch"
 "#;
     let mut file = Builder::new().suffix(".toml").tempfile().unwrap();
     std::io::Write::write_all(&mut file, toml.as_bytes()).unwrap();
@@ -438,8 +457,15 @@ sample_rate = 64
 
     assert_eq!(cfg.input_patterns.unwrap()[0], "data/*.txt");
     assert_eq!(cfg.output_dir.unwrap().to_string_lossy(), "out");
-    assert_eq!(size_value_to_usize(cfg.chunk_size.as_ref().unwrap()).unwrap(), 64 * 1024 * 1024);
-    assert_eq!(size_value_to_usize(cfg.read_buffer.as_ref().unwrap()).unwrap(), 1_048_576);
+    assert_eq!(
+        size_value_to_usize(cfg.chunk_size.as_ref().unwrap()).unwrap(),
+        64 * 1024 * 1024
+    );
+    assert_eq!(
+        size_value_to_usize(cfg.read_buffer.as_ref().unwrap()).unwrap(),
+        1_048_576
+    );
     assert_eq!(cfg.num_workers.unwrap(), 8);
     assert_eq!(cfg.sample_rate.unwrap(), 64);
+    assert_eq!(cfg.scratch_dir.unwrap().to_string_lossy(), "scratch");
 }

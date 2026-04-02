@@ -1,12 +1,12 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use rust_fm_index::DEFAULT_WAVELET_MAX_BYTES;
 use rust_fm_index::index::encoding::ALPHABET_SIZE;
 use rust_fm_index::index::wavelet::{
-    canonical_codes, huffman_lengths, plan_wavelet_stream, write_wavelet_stream_from_bwt,
-    WaveletTreeBuilder,
+    WaveletTreeBuilder, canonical_codes, huffman_lengths, plan_wavelet_stream,
+    write_wavelet_stream_from_bwt,
 };
-use rust_fm_index::DEFAULT_WAVELET_MAX_BYTES;
 use std::io::{BufWriter, Cursor, Write};
 use tempfile::tempfile;
 

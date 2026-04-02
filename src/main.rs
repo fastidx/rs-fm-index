@@ -2,8 +2,8 @@ use clap::{Args, Parser, Subcommand};
 use rust_fm_index::ingest::config::{IngestConfigFile, parse_size, size_value_to_usize};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
 use rust_fm_index::{
-    DocHit, EncodingMode, IndexBuilder, IndexReader, MultiShardReader, WaveletBuildMode,
-    DEFAULT_WAVELET_MAX_BYTES,
+    DEFAULT_WAVELET_MAX_BYTES, DocHit, EncodingMode, IndexBuilder, IndexReader, MultiShardReader,
+    WaveletBuildMode,
 };
 use std::io::Write;
 use std::path::PathBuf;
@@ -42,6 +42,9 @@ struct BuildArgs {
     /// Max bytes for auto wavelet build mode (e.g. 256MiB)
     #[arg(long, value_parser = parse_size, default_value = "256MiB")]
     wavelet_max_bytes: usize,
+    /// Scratch directory for temporary build files
+    #[arg(long)]
+    scratch_dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -60,6 +63,9 @@ struct BuildMultiArgs {
     /// Max bytes for auto wavelet build mode (e.g. 256MiB)
     #[arg(long, value_parser = parse_size, default_value = "256MiB")]
     wavelet_max_bytes: usize,
+    /// Scratch directory for temporary build files
+    #[arg(long)]
+    scratch_dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -94,6 +100,9 @@ struct IngestArgs {
     /// Max bytes for auto wavelet build mode (e.g. 256MiB)
     #[arg(long, value_parser = parse_size)]
     wavelet_max_bytes: Option<usize>,
+    /// Scratch directory for temporary build files
+    #[arg(long)]
+    scratch_dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -150,6 +159,11 @@ fn run_build(args: BuildArgs) {
     let builder = IndexBuilder::new(args.sample_rate)
         .with_encoding_mode(encoding_mode)
         .with_wavelet_mode(wavelet_mode);
+    let builder = if let Some(dir) = args.scratch_dir.as_deref() {
+        builder.with_scratch_dir(dir)
+    } else {
+        builder
+    };
     builder
         .build_single_document(&data, &args.output)
         .expect("Build failed");
@@ -174,7 +188,9 @@ fn run_query(args: QueryArgs) {
                 } else {
                     println!("Found {} occurrences in {:.2?}", count, start.elapsed());
 
-                    let locs = engine.locate_doc_safe(args.pattern.as_bytes()).unwrap_or_default();
+                    let locs = engine
+                        .locate_doc_safe(args.pattern.as_bytes())
+                        .unwrap_or_default();
                     let preview = locs.iter().take(5).collect::<Vec<_>>();
                     println!("Locations (first 5): {:?}", preview);
                     for &&pos in preview.iter() {
@@ -242,7 +258,9 @@ fn run_query_shards(args: QueryArgs) {
                     .locate_merged_doc_safe(args.pattern.as_bytes())
                     .unwrap_or_default()
             } else {
-                router.locate_merged(args.pattern.as_bytes()).unwrap_or_default()
+                router
+                    .locate_merged(args.pattern.as_bytes())
+                    .unwrap_or_default()
             };
 
             let mut flat_positions: Vec<(u64, u64)> = Vec::new();
@@ -396,6 +414,11 @@ fn run_build_multi(args: BuildMultiArgs) {
     let builder = IndexBuilder::new(args.sample_rate)
         .with_encoding_mode(encoding_mode)
         .with_wavelet_mode(wavelet_mode);
+    let builder = if let Some(dir) = args.scratch_dir.as_deref() {
+        builder.with_scratch_dir(dir)
+    } else {
+        builder
+    };
     let input_paths = args.inputs.clone();
     builder
         .build_multi_from_paths(&args.output, &input_paths)
@@ -477,7 +500,10 @@ fn run_ingest(args: IngestArgs) {
     let binary_mode = if args.binary {
         true
     } else {
-        file_cfg.as_ref().and_then(|c| c.binary_mode).unwrap_or(false)
+        file_cfg
+            .as_ref()
+            .and_then(|c| c.binary_mode)
+            .unwrap_or(false)
     };
     let encoding_mode = if binary_mode {
         EncodingMode::Binary
@@ -501,6 +527,11 @@ fn run_ingest(args: IngestArgs) {
         DEFAULT_WAVELET_MAX_BYTES
     };
     let wavelet_mode = parse_wavelet_mode(&wavelet_mode_str, wavelet_max_bytes);
+    let scratch_dir = if let Some(dir) = args.scratch_dir {
+        Some(dir)
+    } else {
+        file_cfg.as_ref().and_then(|c| c.scratch_dir.clone())
+    };
 
     println!("Starting distributed ingestion");
     println!("Patterns: {:?}", input_patterns);
@@ -519,10 +550,14 @@ fn run_ingest(args: IngestArgs) {
     println!("Sample rate: {}", sample_rate);
     println!("Encoding mode: {:?}", encoding_mode);
     println!("Wavelet mode: {:?}", wavelet_mode);
+    if let Some(dir) = scratch_dir.as_ref() {
+        println!("Scratch dir: {:?}", dir);
+    }
 
     let config = IngestConfig {
         input_patterns,
         output_dir,
+        scratch_dir,
         chunk_size,
         read_buffer,
         num_workers: workers,

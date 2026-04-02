@@ -1,8 +1,9 @@
-pub mod builder;
 pub mod bitpack;
+pub mod builder;
 pub mod encoding;
 pub mod external_sa;
 pub mod header;
 pub mod query;
 pub mod sampled_sa;
+pub(crate) mod scratch;
 pub mod wavelet;

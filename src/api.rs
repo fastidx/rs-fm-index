@@ -17,6 +17,7 @@ pub struct IndexBuilder {
     sample_rate: u32,
     encoding_mode: EncodingMode,
     wavelet_mode: WaveletBuildMode,
+    scratch_dir: Option<PathBuf>,
 }
 
 impl IndexBuilder {
@@ -25,6 +26,7 @@ impl IndexBuilder {
             sample_rate,
             encoding_mode: EncodingMode::Text,
             wavelet_mode: WaveletBuildMode::default(),
+            scratch_dir: None,
         }
     }
 
@@ -36,6 +38,21 @@ impl IndexBuilder {
     pub fn with_wavelet_mode(mut self, wavelet_mode: WaveletBuildMode) -> Self {
         self.wavelet_mode = wavelet_mode;
         self
+    }
+
+    pub fn with_scratch_dir<P: AsRef<Path>>(mut self, scratch_dir: P) -> Self {
+        self.scratch_dir = Some(scratch_dir.as_ref().to_path_buf());
+        self
+    }
+
+    fn shard_builder(&self) -> ShardBuilder {
+        let builder =
+            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
+        if let Some(scratch_dir) = self.scratch_dir.as_deref() {
+            builder.with_scratch_dir(scratch_dir)
+        } else {
+            builder
+        }
     }
 
     /// Build a single-document index. A trailing sentinel (0 byte) is added.
@@ -56,8 +73,7 @@ impl IndexBuilder {
         text: &[u8],
         writer: W,
     ) -> io::Result<()> {
-        let builder =
-            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
+        let builder = self.shard_builder();
         builder.build_with_offsets_to_writer(text, vec![0], writer)
     }
 
@@ -95,8 +111,7 @@ impl IndexBuilder {
             text.extend_from_slice(doc);
         }
 
-        let builder =
-            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
+        let builder = self.shard_builder();
         builder.build_with_offsets_to_writer(&text, offsets, writer)
     }
 
@@ -142,8 +157,7 @@ impl IndexBuilder {
         writer: W,
     ) -> io::Result<()> {
         validate_doc_offsets(text.len(), doc_offsets)?;
-        let builder =
-            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
+        let builder = self.shard_builder();
         builder.build_with_offsets_to_writer(text, doc_offsets.to_vec(), writer)
     }
 }

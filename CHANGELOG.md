@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.3] - 2026-04-02
+
+### Added
+
+- Configurable scratch directory for build-time temporary files (BWT staging, streaming wavelet node bitfiles, and external SA runs/merge files).
+- CLI support for scratch directory selection via `--scratch-dir` on `build`, `build-multi`, and `ingest`.
+- Ingest config file support for `scratch_dir`.
+- Library API support via `IndexBuilder::with_scratch_dir(...)`.
+- Environment override `FM_INDEX_SCRATCH_DIR` for operational scratch-dir control without changing code paths.
+
+### Changed
+
+- Temp-file allocation now resolves in this order: explicit scratch dir (CLI/API/config), then `FM_INDEX_SCRATCH_DIR`, then system temp directory.
+
 ## [0.0.2] - 2026-03-10
 
 ### Added

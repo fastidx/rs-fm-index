@@ -14,6 +14,7 @@ pub struct IngestConfigFile {
     pub binary_mode: Option<bool>,
     pub wavelet_mode: Option<String>,
     pub wavelet_max_bytes: Option<SizeValue>,
+    pub scratch_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,8 +40,7 @@ impl IngestConfigFile {
                 Ok(cfg)
             }
             "toml" | "tml" => {
-                let cfg: IngestConfigFile =
-                    toml::from_str(&data).context("Invalid TOML config")?;
+                let cfg: IngestConfigFile = toml::from_str(&data).context("Invalid TOML config")?;
                 Ok(cfg)
             }
             _ => anyhow::bail!("Config must be .json or .toml"),
