@@ -9,37 +9,74 @@ use crate::index::scratch;
 use tempfile::NamedTempFile;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Tuple {
-    r1: u64,
-    r2: u64,
-    idx: u64,
+struct Tuple32 {
+    r1: u32,
+    r2: u32,
+    idx: u32,
 }
 
-impl Ord for Tuple {
+impl Ord for Tuple32 {
     fn cmp(&self, other: &Self) -> Ordering {
         (self.r1, self.r2, self.idx).cmp(&(other.r1, other.r2, other.idx))
     }
 }
 
-impl PartialOrd for Tuple {
+impl PartialOrd for Tuple32 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct HeapItem {
-    tuple: Tuple,
+struct HeapItem32 {
+    tuple: Tuple32,
     run_idx: usize,
 }
 
-impl Ord for HeapItem {
+impl Ord for HeapItem32 {
     fn cmp(&self, other: &Self) -> Ordering {
         self.tuple.cmp(&other.tuple)
     }
 }
 
-impl PartialOrd for HeapItem {
+impl PartialOrd for HeapItem32 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Tuple64 {
+    r1: u64,
+    r2: u64,
+    idx: u64,
+}
+
+impl Ord for Tuple64 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.r1, self.r2, self.idx).cmp(&(other.r1, other.r2, other.idx))
+    }
+}
+
+impl PartialOrd for Tuple64 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HeapItem64 {
+    tuple: Tuple64,
+    run_idx: usize,
+}
+
+impl Ord for HeapItem64 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.tuple.cmp(&other.tuple)
+    }
+}
+
+impl PartialOrd for HeapItem64 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -176,14 +213,18 @@ fn build_sa_external_from_rank_u32(
         ));
     }
 
-    let chunk_len = chunk_len_from_mem_limit(mem_limit_bytes);
+    let chunk_len = chunk_len_from_mem_limit(mem_limit_bytes, size_of::<Tuple32>());
 
     let mut next_rank = vec![0u32; n];
     let mut step = 1usize;
 
     loop {
-        let runs = build_runs_u32(&rank, step, chunk_len, scratch_dir)?;
-        let (rank_count, sa_file) = merge_runs_u32(runs, &mut next_rank, scratch_dir)?;
+        let (rank_count, sa_file) = if chunk_len >= n {
+            sort_round_u32_in_memory(&rank, step, &mut next_rank, scratch_dir)?
+        } else {
+            let runs = build_runs_u32(&rank, step, chunk_len, scratch_dir)?;
+            merge_runs_u32(runs, &mut next_rank, scratch_dir)?
+        };
 
         if rank_count == n {
             return Ok(SaStream {
@@ -218,14 +259,18 @@ fn build_sa_external_from_rank_u64(
         ));
     }
 
-    let chunk_len = chunk_len_from_mem_limit(mem_limit_bytes);
+    let chunk_len = chunk_len_from_mem_limit(mem_limit_bytes, size_of::<Tuple64>());
 
     let mut next_rank = vec![0u64; n];
     let mut step = 1usize;
 
     loop {
-        let runs = build_runs_u64(&rank, step, chunk_len, scratch_dir)?;
-        let (rank_count, sa_file) = merge_runs_u64(runs, &mut next_rank, scratch_dir)?;
+        let (rank_count, sa_file) = if chunk_len >= n {
+            sort_round_u64_in_memory(&rank, step, &mut next_rank, scratch_dir)?
+        } else {
+            let runs = build_runs_u64(&rank, step, chunk_len, scratch_dir)?;
+            merge_runs_u64(runs, &mut next_rank, scratch_dir)?
+        };
 
         if rank_count == n {
             return Ok(SaStream {
@@ -247,13 +292,95 @@ fn build_sa_external_from_rank_u64(
     }
 }
 
-fn chunk_len_from_mem_limit(mem_limit_bytes: usize) -> usize {
-    let tuple_bytes = size_of::<Tuple>().max(1);
+fn chunk_len_from_mem_limit(mem_limit_bytes: usize, tuple_bytes: usize) -> usize {
+    let tuple_bytes = tuple_bytes.max(1);
     let mut chunk_len = mem_limit_bytes / tuple_bytes;
     if chunk_len == 0 {
         chunk_len = 1;
     }
     chunk_len
+}
+
+fn sort_round_u32_in_memory(
+    rank: &[u32],
+    step: usize,
+    new_rank: &mut [u32],
+    scratch_dir: Option<&Path>,
+) -> io::Result<(usize, NamedTempFile)> {
+    let n = rank.len();
+    let mut tuples = Vec::with_capacity(n);
+    for i in 0..n {
+        let r1 = rank[i];
+        let r2 = if i + step < n { rank[i + step] } else { 0 };
+        tuples.push(Tuple32 {
+            r1,
+            r2,
+            idx: i as u32,
+        });
+    }
+    tuples.sort_unstable();
+
+    let mut rank_count = 0usize;
+    let mut prev_key: Option<(u32, u32)> = None;
+    let mut sa_file = scratch::named_temp_file(scratch_dir)?;
+    {
+        let mut sa_writer = BufWriter::new(sa_file.as_file_mut());
+        for tuple in tuples {
+            let key = (tuple.r1, tuple.r2);
+            if prev_key != Some(key) {
+                rank_count += 1;
+                prev_key = Some(key);
+            }
+            let idx = tuple.idx as usize;
+            if idx < new_rank.len() {
+                new_rank[idx] = rank_count as u32;
+            }
+            sa_writer.write_all(&(tuple.idx as u64).to_le_bytes())?;
+        }
+        sa_writer.flush()?;
+    }
+    Ok((rank_count, sa_file))
+}
+
+fn sort_round_u64_in_memory(
+    rank: &[u64],
+    step: usize,
+    new_rank: &mut [u64],
+    scratch_dir: Option<&Path>,
+) -> io::Result<(usize, NamedTempFile)> {
+    let n = rank.len();
+    let mut tuples = Vec::with_capacity(n);
+    for i in 0..n {
+        let r1 = rank[i];
+        let r2 = if i + step < n { rank[i + step] } else { 0 };
+        tuples.push(Tuple64 {
+            r1,
+            r2,
+            idx: i as u64,
+        });
+    }
+    tuples.sort_unstable();
+
+    let mut rank_count = 0usize;
+    let mut prev_key: Option<(u64, u64)> = None;
+    let mut sa_file = scratch::named_temp_file(scratch_dir)?;
+    {
+        let mut sa_writer = BufWriter::new(sa_file.as_file_mut());
+        for tuple in tuples {
+            let key = (tuple.r1, tuple.r2);
+            if prev_key != Some(key) {
+                rank_count += 1;
+                prev_key = Some(key);
+            }
+            let idx = tuple.idx as usize;
+            if idx < new_rank.len() {
+                new_rank[idx] = rank_count as u64;
+            }
+            sa_writer.write_all(&tuple.idx.to_le_bytes())?;
+        }
+        sa_writer.flush()?;
+    }
+    Ok((rank_count, sa_file))
 }
 
 fn build_runs_u32(
@@ -271,21 +398,17 @@ fn build_runs_u32(
         let mut tuples = Vec::with_capacity(end - start);
 
         for i in start..end {
-            let r1 = rank[i] as u64;
-            let r2 = if i + step < n {
-                rank[i + step] as u64
-            } else {
-                0
-            };
-            tuples.push(Tuple {
+            let r1 = rank[i];
+            let r2 = if i + step < n { rank[i + step] } else { 0 };
+            tuples.push(Tuple32 {
                 r1,
                 r2,
-                idx: i as u64,
+                idx: i as u32,
             });
         }
 
         tuples.sort_unstable();
-        let run_file = write_run(&tuples, scratch_dir)?;
+        let run_file = write_run_u32(&tuples, scratch_dir)?;
         runs.push(run_file);
 
         start = end;
@@ -311,7 +434,7 @@ fn build_runs_u64(
         for i in start..end {
             let r1 = rank[i];
             let r2 = if i + step < n { rank[i + step] } else { 0 };
-            tuples.push(Tuple {
+            tuples.push(Tuple64 {
                 r1,
                 r2,
                 idx: i as u64,
@@ -319,7 +442,7 @@ fn build_runs_u64(
         }
 
         tuples.sort_unstable();
-        let run_file = write_run(&tuples, scratch_dir)?;
+        let run_file = write_run_u64(&tuples, scratch_dir)?;
         runs.push(run_file);
 
         start = end;
@@ -328,7 +451,7 @@ fn build_runs_u64(
     Ok(runs)
 }
 
-fn write_run(tuples: &[Tuple], scratch_dir: Option<&Path>) -> io::Result<NamedTempFile> {
+fn write_run_u32(tuples: &[Tuple32], scratch_dir: Option<&Path>) -> io::Result<NamedTempFile> {
     let mut file = scratch::named_temp_file(scratch_dir)?;
     {
         let mut writer = BufWriter::new(file.as_file_mut());
@@ -342,25 +465,65 @@ fn write_run(tuples: &[Tuple], scratch_dir: Option<&Path>) -> io::Result<NamedTe
     Ok(file)
 }
 
-struct RunReader {
+fn write_run_u64(tuples: &[Tuple64], scratch_dir: Option<&Path>) -> io::Result<NamedTempFile> {
+    let mut file = scratch::named_temp_file(scratch_dir)?;
+    {
+        let mut writer = BufWriter::new(file.as_file_mut());
+        for t in tuples {
+            writer.write_all(&t.r1.to_le_bytes())?;
+            writer.write_all(&t.r2.to_le_bytes())?;
+            writer.write_all(&t.idx.to_le_bytes())?;
+        }
+        writer.flush()?;
+    }
+    Ok(file)
+}
+
+struct RunReader32 {
     reader: BufReader<File>,
 }
 
-impl RunReader {
+impl RunReader32 {
     fn new(file: &NamedTempFile) -> io::Result<Self> {
         Ok(Self {
             reader: BufReader::new(file.reopen()?),
         })
     }
 
-    fn next_tuple(&mut self) -> io::Result<Option<Tuple>> {
+    fn next_tuple(&mut self) -> io::Result<Option<Tuple32>> {
+        let mut buf = [0u8; 12];
+        match self.reader.read_exact(&mut buf) {
+            Ok(()) => {
+                let r1 = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+                let r2 = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+                let idx = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+                Ok(Some(Tuple32 { r1, r2, idx }))
+            }
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+struct RunReader64 {
+    reader: BufReader<File>,
+}
+
+impl RunReader64 {
+    fn new(file: &NamedTempFile) -> io::Result<Self> {
+        Ok(Self {
+            reader: BufReader::new(file.reopen()?),
+        })
+    }
+
+    fn next_tuple(&mut self) -> io::Result<Option<Tuple64>> {
         let mut buf = [0u8; 24];
         match self.reader.read_exact(&mut buf) {
             Ok(()) => {
                 let r1 = u64::from_le_bytes(buf[0..8].try_into().unwrap());
                 let r2 = u64::from_le_bytes(buf[8..16].try_into().unwrap());
                 let idx = u64::from_le_bytes(buf[16..24].try_into().unwrap());
-                Ok(Some(Tuple { r1, r2, idx }))
+                Ok(Some(Tuple64 { r1, r2, idx }))
             }
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
             Err(err) => Err(err),
@@ -373,20 +536,20 @@ fn merge_runs_u32(
     new_rank: &mut [u32],
     scratch_dir: Option<&Path>,
 ) -> io::Result<(usize, NamedTempFile)> {
-    let mut readers: Vec<RunReader> = Vec::with_capacity(runs.len());
+    let mut readers: Vec<RunReader32> = Vec::with_capacity(runs.len());
     for run in &runs {
-        readers.push(RunReader::new(run)?);
+        readers.push(RunReader32::new(run)?);
     }
 
-    let mut heap: BinaryHeap<std::cmp::Reverse<HeapItem>> = BinaryHeap::new();
+    let mut heap: BinaryHeap<std::cmp::Reverse<HeapItem32>> = BinaryHeap::new();
     for (run_idx, reader) in readers.iter_mut().enumerate() {
         if let Some(tuple) = reader.next_tuple()? {
-            heap.push(std::cmp::Reverse(HeapItem { tuple, run_idx }));
+            heap.push(std::cmp::Reverse(HeapItem32 { tuple, run_idx }));
         }
     }
 
     let mut rank_count = 0usize;
-    let mut prev_key: Option<(u64, u64)> = None;
+    let mut prev_key: Option<(u32, u32)> = None;
 
     let mut sa_file = scratch::named_temp_file(scratch_dir)?;
     {
@@ -403,10 +566,10 @@ fn merge_runs_u32(
                 new_rank[idx] = rank_count as u32;
             }
 
-            sa_writer.write_all(&item.tuple.idx.to_le_bytes())?;
+            sa_writer.write_all(&(item.tuple.idx as u64).to_le_bytes())?;
 
             if let Some(next_tuple) = readers[item.run_idx].next_tuple()? {
-                heap.push(std::cmp::Reverse(HeapItem {
+                heap.push(std::cmp::Reverse(HeapItem32 {
                     tuple: next_tuple,
                     run_idx: item.run_idx,
                 }));
@@ -423,15 +586,15 @@ fn merge_runs_u64(
     new_rank: &mut [u64],
     scratch_dir: Option<&Path>,
 ) -> io::Result<(usize, NamedTempFile)> {
-    let mut readers: Vec<RunReader> = Vec::with_capacity(runs.len());
+    let mut readers: Vec<RunReader64> = Vec::with_capacity(runs.len());
     for run in &runs {
-        readers.push(RunReader::new(run)?);
+        readers.push(RunReader64::new(run)?);
     }
 
-    let mut heap: BinaryHeap<std::cmp::Reverse<HeapItem>> = BinaryHeap::new();
+    let mut heap: BinaryHeap<std::cmp::Reverse<HeapItem64>> = BinaryHeap::new();
     for (run_idx, reader) in readers.iter_mut().enumerate() {
         if let Some(tuple) = reader.next_tuple()? {
-            heap.push(std::cmp::Reverse(HeapItem { tuple, run_idx }));
+            heap.push(std::cmp::Reverse(HeapItem64 { tuple, run_idx }));
         }
     }
 
@@ -456,7 +619,7 @@ fn merge_runs_u64(
             sa_writer.write_all(&item.tuple.idx.to_le_bytes())?;
 
             if let Some(next_tuple) = readers[item.run_idx].next_tuple()? {
-                heap.push(std::cmp::Reverse(HeapItem {
+                heap.push(std::cmp::Reverse(HeapItem64 {
                     tuple: next_tuple,
                     run_idx: item.run_idx,
                 }));
