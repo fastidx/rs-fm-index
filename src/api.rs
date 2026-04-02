@@ -1,6 +1,7 @@
 use crate::index::builder::ShardBuilder;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
+use crate::index::sa_backend::SaBackendKind;
 use crate::index::wavelet::WaveletBuildMode;
 use crate::iolib::paged_reader::{
     GlobalPageCache, PagedReader, PagedReaderConfig, RandomAccessRead, SharedRandomAccessRead,
@@ -16,6 +17,8 @@ pub struct IndexBuilder {
     sample_rate: u32,
     wavelet_mode: WaveletBuildMode,
     scratch_dir: Option<PathBuf>,
+    sa_backend_kind: SaBackendKind,
+    sa_external_mem_limit_bytes: Option<usize>,
 }
 
 impl IndexBuilder {
@@ -24,6 +27,8 @@ impl IndexBuilder {
             sample_rate,
             wavelet_mode: WaveletBuildMode::default(),
             scratch_dir: None,
+            sa_backend_kind: SaBackendKind::Auto,
+            sa_external_mem_limit_bytes: None,
         }
     }
 
@@ -37,8 +42,22 @@ impl IndexBuilder {
         self
     }
 
+    pub fn with_sa_backend_kind(mut self, kind: SaBackendKind) -> Self {
+        self.sa_backend_kind = kind;
+        self
+    }
+
+    pub fn with_sa_external_mem_limit_bytes(mut self, mem_limit_bytes: usize) -> Self {
+        self.sa_external_mem_limit_bytes = Some(mem_limit_bytes.max(1));
+        self
+    }
+
     fn shard_builder(&self) -> ShardBuilder {
-        let builder = ShardBuilder::new_with_wavelet_mode(self.sample_rate, self.wavelet_mode);
+        let mut builder = ShardBuilder::new_with_wavelet_mode(self.sample_rate, self.wavelet_mode)
+            .with_sa_backend_kind(self.sa_backend_kind);
+        if let Some(mem_limit) = self.sa_external_mem_limit_bytes {
+            builder = builder.with_sa_external_mem_limit_bytes(mem_limit);
+        }
         if let Some(scratch_dir) = self.scratch_dir.as_deref() {
             builder.with_scratch_dir(scratch_dir)
         } else {

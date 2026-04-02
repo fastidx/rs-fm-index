@@ -1,6 +1,6 @@
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use cdivsufsort::sort as div_sort;
-use std::env;
+use libsais::{LibsaisError, SuffixArrayConstruction};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use crate::index::bitpack;
 use crate::index::encoding::{ALPHABET_SIZE, EncodingMode, SENTINEL};
 use crate::index::external_sa;
 use crate::index::header::{ShardHeader, ShardHeaderParams};
+use crate::index::sa_backend::{SaBackendKind, SaBuildConfig};
 use crate::index::scratch;
 use crate::index::wavelet::{
     WaveletBuildMode, canonical_codes, huffman_lengths, make_wavelet_build_strategy,
@@ -18,13 +19,12 @@ pub struct ShardBuilder {
     sample_rate: u32,
     wavelet_mode: WaveletBuildMode,
     scratch_dir: Option<PathBuf>,
+    sa_build: SaBuildConfig,
 }
-
-const EXTERNAL_SA_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
-const DEFAULT_EXTERNAL_SA_MEM_BYTES: usize = 256 * 1024 * 1024;
 
 enum SaSource {
     InMemory(Vec<i32>),
+    InMemoryU64(Vec<u64>),
     External(external_sa::SaStream),
 }
 
@@ -68,6 +68,7 @@ impl ShardBuilder {
             sample_rate,
             wavelet_mode: WaveletBuildMode::default(),
             scratch_dir: None,
+            sa_build: SaBuildConfig::default(),
         }
     }
 
@@ -76,11 +77,22 @@ impl ShardBuilder {
             sample_rate,
             wavelet_mode,
             scratch_dir: None,
+            sa_build: SaBuildConfig::default(),
         }
     }
 
     pub fn with_scratch_dir<P: AsRef<Path>>(mut self, scratch_dir: P) -> Self {
         self.scratch_dir = Some(scratch_dir.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_sa_backend_kind(mut self, kind: SaBackendKind) -> Self {
+        self.sa_build.kind = kind;
+        self
+    }
+
+    pub fn with_sa_external_mem_limit_bytes(mut self, mem_limit_bytes: usize) -> Self {
+        self.sa_build.external_mem_limit_bytes = Some(mem_limit_bytes.max(1));
         self
     }
 
@@ -156,7 +168,8 @@ impl ShardBuilder {
         let mut writer = std::io::BufWriter::new(writer);
 
         // 1. Compute Suffix Array
-        let sa_source = build_sa_source(text_view.raw, self.scratch_dir.as_deref())?;
+        let sa_source =
+            build_sa_source(text_view.raw, self.scratch_dir.as_deref(), &self.sa_build)?;
 
         // 2. Build BWT + samples using an external-memory pipeline
         let len = text_view.len_with_sentinel();
@@ -176,6 +189,31 @@ impl ShardBuilder {
             match sa_source {
                 SaSource::InMemory(ref sa_i32) => {
                     for (row_idx, &sa_val) in sa_i32.iter().enumerate() {
+                        let pos = sa_val as usize;
+
+                        if row_idx % sample_rate == 0 {
+                            sa_samples.push(pos as u64);
+                        }
+                        if pos % sample_rate == 0 {
+                            let idx = pos / sample_rate;
+                            if idx < isa_samples.len() {
+                                isa_samples[idx] = row_idx as u64;
+                            }
+                        }
+
+                        let bwt_sym = text_view.bwt_symbol_for_sa_pos(pos);
+                        counts[bwt_sym as usize] += 1;
+                        buffer.push(bwt_sym);
+
+                        if buffer.len() >= 4 * 1024 * 1024 {
+                            for sym in buffer.drain(..) {
+                                writer.write_u16::<LittleEndian>(sym)?;
+                            }
+                        }
+                    }
+                }
+                SaSource::InMemoryU64(ref sa_u64) => {
+                    for (row_idx, &sa_val) in sa_u64.iter().enumerate() {
                         let pos = sa_val as usize;
 
                         if row_idx % sample_rate == 0 {
@@ -442,35 +480,77 @@ impl ShardBuilder {
     }
 }
 
-fn build_sa_source(text: &[u8], scratch_dir: Option<&Path>) -> io::Result<SaSource> {
+fn build_sa_source(
+    text: &[u8],
+    scratch_dir: Option<&Path>,
+    sa_build: &SaBuildConfig,
+) -> io::Result<SaSource> {
     let indexed_len = text.len().saturating_add(1);
-    if should_use_external_sa(indexed_len) {
-        let mem_limit = external_sa_mem_limit();
-        let stream =
-            external_sa::build_sa_external_text_bytes_with_scratch(text, mem_limit, scratch_dir)?;
-        return Ok(SaSource::External(stream));
-    }
+    match sa_build.resolved_kind(indexed_len) {
+        SaBackendKind::DivSufSort32 => {
+            if indexed_len > i32::MAX as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "DivSufSort32 backend does not support indexed text length > i32::MAX; use External or LibSais64 backend",
+                ));
+            }
 
-    let mut text_u8 = Vec::with_capacity(indexed_len);
-    text_u8.extend_from_slice(text);
-    text_u8.push(SENTINEL as u8);
+            let mut text_u8 = Vec::with_capacity(indexed_len);
+            text_u8.extend_from_slice(text);
+            text_u8.push(SENTINEL as u8);
 
-    let (_, sa_i32) = div_sort(&text_u8).into_parts();
-    Ok(SaSource::InMemory(sa_i32))
-}
-
-fn should_use_external_sa(len: usize) -> bool {
-    if let Ok(value) = env::var("FM_INDEX_EXTERNAL_SA") {
-        return value == "1" || value.eq_ignore_ascii_case("true");
-    }
-    len >= EXTERNAL_SA_THRESHOLD_BYTES
-}
-
-fn external_sa_mem_limit() -> usize {
-    if let Ok(value) = env::var("FM_INDEX_EXTERNAL_SA_MEM_BYTES") {
-        if let Ok(parsed) = value.parse::<usize>() {
-            return parsed.max(1);
+            let (_, sa_i32) = div_sort(&text_u8).into_parts();
+            Ok(SaSource::InMemory(sa_i32))
         }
+        SaBackendKind::External => {
+            let mem_limit = sa_build.resolved_external_mem_limit_bytes();
+            let stream = external_sa::build_sa_external_text_bytes_with_scratch(
+                text,
+                mem_limit,
+                scratch_dir,
+            )?;
+            Ok(SaSource::External(stream))
+        }
+        SaBackendKind::LibSais64 => {
+            let mut text_u8 = Vec::with_capacity(indexed_len);
+            text_u8.extend_from_slice(text);
+            text_u8.push(SENTINEL as u8);
+
+            let sa_i64 = SuffixArrayConstruction::for_text(text_u8.as_slice())
+                .in_owned_buffer64()
+                .single_threaded()
+                .run()
+                .map_err(libsais_error_to_io)?
+                .into_vec();
+
+            let mut sa_u64 = Vec::with_capacity(sa_i64.len());
+            for sa in sa_i64 {
+                if sa < 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "libsais returned negative suffix array value",
+                    ));
+                }
+                sa_u64.push(sa as u64);
+            }
+            Ok(SaSource::InMemoryU64(sa_u64))
+        }
+        SaBackendKind::Auto => unreachable!("Auto backend must be resolved before dispatch"),
     }
-    DEFAULT_EXTERNAL_SA_MEM_BYTES
+}
+
+fn libsais_error_to_io(err: LibsaisError) -> io::Error {
+    match err {
+        LibsaisError::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "libsais failed due to invalid input",
+        ),
+        LibsaisError::OutOfMemory => {
+            io::Error::new(io::ErrorKind::OutOfMemory, "libsais ran out of memory")
+        }
+        LibsaisError::UnknownError => io::Error::new(
+            io::ErrorKind::Other,
+            "libsais failed with an unknown internal error",
+        ),
+    }
 }
