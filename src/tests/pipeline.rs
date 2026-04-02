@@ -302,7 +302,6 @@ fn test_orchestrator_chunking() {
         read_buffer: 64,
         num_workers: 2,
         sample_rate: 4,
-        encoding_mode: EncodingMode::Text,
         wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 
@@ -358,7 +357,6 @@ fn test_orchestrator_oversized_split_metadata() {
         read_buffer: 64,
         num_workers: 2,
         sample_rate: 4,
-        encoding_mode: EncodingMode::Text,
         wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 
@@ -417,7 +415,6 @@ fn test_multishard_merge_cross_boundary() {
         read_buffer: 4,
         num_workers: 1,
         sample_rate: 4,
-        encoding_mode: EncodingMode::Text,
         wavelet_mode: crate::index::wavelet::WaveletBuildMode::default(),
     };
 

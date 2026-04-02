@@ -292,14 +292,8 @@ let doc = reader.get_document(0)?;
 This implementation uses `0` as a sentinel byte. Multi-document builds append a single trailing
 sentinel; document boundaries are tracked via doc offsets (no separators between documents).
 
-Text mode (default):
-
 - Inputs **must not contain `0`**.
-
-Binary mode:
-
-- Enable with `--binary` (CLI) or `IndexBuilder::with_encoding_mode(EncodingMode::Binary)`.
-- Bytes are remapped with `b + 1`, and `0` is reserved for the sentinel.
+- Binary build mode has been removed from this version. If needed, use a previous tagged version.
 
 ---
 

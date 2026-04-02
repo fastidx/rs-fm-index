@@ -292,19 +292,11 @@ let doc = reader.get_document(42)?;
 
 The implementation uses **byte `0` as a sentinel**.
 
-Text mode (default):
-
 - Input documents **must not contain `0` bytes**.
 - Single-doc builds add the sentinel automatically.
 - Multi-doc builds append a single trailing `0`; document boundaries are tracked via doc offsets.
-
-Binary mode:
-
-- Enable with `--binary` (CLI) or `IndexBuilder::with_encoding_mode(EncodingMode::Binary)`.
-- Input bytes are remapped with `b + 1`, and `0` is reserved for the sentinel.
-- Queries/extracts are decoded automatically; the mode is stored in the header.
-
-If your input can contain `0`, use binary mode.
+- Binary build mode has been removed from this version. If you need binary-mode indexing,
+  use a previous tagged version.
 
 ---
 

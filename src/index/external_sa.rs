@@ -102,7 +102,46 @@ pub fn build_sa_external_with_scratch(
     mem_limit_bytes: usize,
     scratch_dir: Option<&Path>,
 ) -> io::Result<SaStream> {
-    let n = text.len();
+    let rank: Vec<u64> = text.iter().map(|&b| b as u64 + 1).collect();
+    build_sa_external_from_rank(rank, mem_limit_bytes, scratch_dir)
+}
+
+/// Build a SA stream from text-mode bytes without allocating an intermediate encoded u16 buffer.
+/// The trailing sentinel is virtualized here as symbol 0.
+pub fn build_sa_external_text_bytes_with_scratch(
+    text: &[u8],
+    mem_limit_bytes: usize,
+    scratch_dir: Option<&Path>,
+) -> io::Result<SaStream> {
+    if text.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text must be non-empty",
+        ));
+    }
+    if text.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input contains 0 byte; cannot use 0 as sentinel",
+        ));
+    }
+
+    // External SA rank domain stores rank-0 sentinel as value 1 and data bytes as 2..=256.
+    let mut rank = Vec::with_capacity(text.len() + 1);
+    for &b in text {
+        rank.push(b as u64 + 1);
+    }
+    rank.push(1);
+
+    build_sa_external_from_rank(rank, mem_limit_bytes, scratch_dir)
+}
+
+fn build_sa_external_from_rank(
+    mut rank: Vec<u64>,
+    mem_limit_bytes: usize,
+    scratch_dir: Option<&Path>,
+) -> io::Result<SaStream> {
+    let n = rank.len();
     if n == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -117,7 +156,6 @@ pub fn build_sa_external_with_scratch(
     }
 
     // Rank 0: Use 0 as sentinel for out-of-range.
-    let mut rank: Vec<u64> = text.iter().map(|&b| b as u64 + 1).collect();
     let mut step = 1usize;
 
     loop {

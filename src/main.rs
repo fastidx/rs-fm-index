@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use rust_fm_index::ingest::config::{IngestConfigFile, parse_size, size_value_to_usize};
 use rust_fm_index::ingest::orchestrator::{IngestConfig, Orchestrator};
 use rust_fm_index::{
-    DEFAULT_WAVELET_MAX_BYTES, DocHit, EncodingMode, IndexBuilder, IndexReader, MultiShardReader,
+    DEFAULT_WAVELET_MAX_BYTES, DocHit, IndexBuilder, IndexReader, MultiShardReader,
     WaveletBuildMode,
 };
 use std::io::Write;
@@ -33,9 +33,6 @@ struct BuildArgs {
     output: PathBuf,
     #[arg(long, default_value_t = 32)]
     sample_rate: u32,
-    /// Enable binary mode (b+1 encoding with reserved sentinel)
-    #[arg(long)]
-    binary: bool,
     /// Wavelet build mode: in-memory, streaming, auto
     #[arg(long, default_value = "auto")]
     wavelet_mode: String,
@@ -54,9 +51,6 @@ struct BuildMultiArgs {
     inputs: Vec<PathBuf>,
     #[arg(long, default_value_t = 32)]
     sample_rate: u32,
-    /// Enable binary mode (b+1 encoding with reserved sentinel)
-    #[arg(long)]
-    binary: bool,
     /// Wavelet build mode: in-memory, streaming, auto
     #[arg(long, default_value = "auto")]
     wavelet_mode: String,
@@ -91,9 +85,6 @@ struct IngestArgs {
     /// SA/ISA sample rate
     #[arg(long)]
     sample_rate: Option<u32>,
-    /// Enable binary mode (b+1 encoding with reserved sentinel)
-    #[arg(long)]
-    binary: bool,
     /// Wavelet build mode: in-memory, streaming, auto
     #[arg(long)]
     wavelet_mode: Option<String>,
@@ -150,15 +141,8 @@ fn run_build(args: BuildArgs) {
     let start = Instant::now();
 
     let data = std::fs::read(&args.input).expect("Failed to read input");
-    let encoding_mode = if args.binary {
-        EncodingMode::Binary
-    } else {
-        EncodingMode::Text
-    };
     let wavelet_mode = parse_wavelet_mode(&args.wavelet_mode, args.wavelet_max_bytes);
-    let builder = IndexBuilder::new(args.sample_rate)
-        .with_encoding_mode(encoding_mode)
-        .with_wavelet_mode(wavelet_mode);
+    let builder = IndexBuilder::new(args.sample_rate).with_wavelet_mode(wavelet_mode);
     let builder = if let Some(dir) = args.scratch_dir.as_deref() {
         builder.with_scratch_dir(dir)
     } else {
@@ -405,15 +389,8 @@ fn run_build_multi(args: BuildMultiArgs) {
     println!("Building multi-document index -> {:?}", args.output);
     let start = Instant::now();
 
-    let encoding_mode = if args.binary {
-        EncodingMode::Binary
-    } else {
-        EncodingMode::Text
-    };
     let wavelet_mode = parse_wavelet_mode(&args.wavelet_mode, args.wavelet_max_bytes);
-    let builder = IndexBuilder::new(args.sample_rate)
-        .with_encoding_mode(encoding_mode)
-        .with_wavelet_mode(wavelet_mode);
+    let builder = IndexBuilder::new(args.sample_rate).with_wavelet_mode(wavelet_mode);
     let builder = if let Some(dir) = args.scratch_dir.as_deref() {
         builder.with_scratch_dir(dir)
     } else {
@@ -497,20 +474,6 @@ fn run_ingest(args: IngestArgs) {
         .or_else(|| file_cfg.as_ref().and_then(|c| c.sample_rate))
         .unwrap_or(32);
 
-    let binary_mode = if args.binary {
-        true
-    } else {
-        file_cfg
-            .as_ref()
-            .and_then(|c| c.binary_mode)
-            .unwrap_or(false)
-    };
-    let encoding_mode = if binary_mode {
-        EncodingMode::Binary
-    } else {
-        EncodingMode::Text
-    };
-
     let wavelet_mode_str = args
         .wavelet_mode
         .or_else(|| file_cfg.as_ref().and_then(|c| c.wavelet_mode.clone()))
@@ -548,7 +511,6 @@ fn run_ingest(args: IngestArgs) {
     );
     println!("Workers: {}", workers);
     println!("Sample rate: {}", sample_rate);
-    println!("Encoding mode: {:?}", encoding_mode);
     println!("Wavelet mode: {:?}", wavelet_mode);
     if let Some(dir) = scratch_dir.as_ref() {
         println!("Scratch dir: {:?}", dir);
@@ -562,7 +524,6 @@ fn run_ingest(args: IngestArgs) {
         read_buffer,
         num_workers: workers,
         sample_rate,
-        encoding_mode,
         wavelet_mode,
     };
 

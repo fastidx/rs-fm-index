@@ -1,5 +1,4 @@
 use crate::index::builder::ShardBuilder;
-use crate::index::encoding::EncodingMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
 use crate::index::wavelet::WaveletBuildMode;
@@ -15,7 +14,6 @@ use std::sync::Arc;
 /// High-level builder for creating FM-index shards.
 pub struct IndexBuilder {
     sample_rate: u32,
-    encoding_mode: EncodingMode,
     wavelet_mode: WaveletBuildMode,
     scratch_dir: Option<PathBuf>,
 }
@@ -24,15 +22,9 @@ impl IndexBuilder {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             sample_rate,
-            encoding_mode: EncodingMode::Text,
             wavelet_mode: WaveletBuildMode::default(),
             scratch_dir: None,
         }
-    }
-
-    pub fn with_encoding_mode(mut self, encoding_mode: EncodingMode) -> Self {
-        self.encoding_mode = encoding_mode;
-        self
     }
 
     pub fn with_wavelet_mode(mut self, wavelet_mode: WaveletBuildMode) -> Self {
@@ -46,8 +38,7 @@ impl IndexBuilder {
     }
 
     fn shard_builder(&self) -> ShardBuilder {
-        let builder =
-            ShardBuilder::new_with_modes(self.sample_rate, self.encoding_mode, self.wavelet_mode);
+        let builder = ShardBuilder::new_with_wavelet_mode(self.sample_rate, self.wavelet_mode);
         if let Some(scratch_dir) = self.scratch_dir.as_deref() {
             builder.with_scratch_dir(scratch_dir)
         } else {
