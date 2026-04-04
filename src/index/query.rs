@@ -1,4 +1,4 @@
-use crate::index::encoding::{EncodingMode, strategy_for};
+use crate::index::encoding::{EncodingMode, decode_symbol_for_extract_text, encode_pattern_text};
 use crate::index::header::ShardHeader;
 use crate::index::sampled_sa::PagedSampledSA;
 use crate::index::wavelet::PagedWaveletTree;
@@ -75,8 +75,10 @@ impl QueryEngine {
     /// Returns the range [sp, ep] in the suffix array rows.
     /// If sp > ep, pattern is not found.
     pub fn count(&self, pattern: &[u8]) -> io::Result<(usize, usize)> {
-        let encoder = strategy_for(self.encoding_mode);
-        let encoded = encoder.encode_pattern(pattern)?;
+        let encoded = match self.encoding_mode {
+            EncodingMode::Text => encode_pattern_text(pattern)?,
+            EncodingMode::Binary => return Err(binary_mode_unsupported_error()),
+        };
         if encoded.is_empty() {
             return Ok((0, self.text_len.saturating_sub(1)));
         }
@@ -174,7 +176,10 @@ impl QueryEngine {
             ));
         }
 
-        let encoder = strategy_for(self.encoding_mode);
+        let decode_symbol = match self.encoding_mode {
+            EncodingMode::Text => decode_symbol_for_extract_text,
+            EncodingMode::Binary => return Err(binary_mode_unsupported_error()),
+        };
         let mut result = vec![0u8; len];
 
         // Start extracting from the END of the requested segment.
@@ -186,7 +191,7 @@ impl QueryEngine {
         for i in (0..len).rev() {
             // Get char at this row (which is the preceding char in text)
             let c = self.wt.access(curr_row)?;
-            result[i] = encoder.decode_symbol_for_extract(c)?;
+            result[i] = decode_symbol(c)?;
 
             // Walk LF to move to the row for this char
             curr_row = self.lf_step(curr_row)?;
@@ -299,10 +304,13 @@ impl QueryEngine {
         };
 
         let mut bytes = self.extract(start, end - start)?;
-        if self.encoding_mode == EncodingMode::Text {
-            if let Some(&0) = bytes.last() {
-                bytes.pop();
+        match self.encoding_mode {
+            EncodingMode::Text => {
+                if let Some(&0) = bytes.last() {
+                    bytes.pop();
+                }
             }
+            EncodingMode::Binary => return Err(binary_mode_unsupported_error()),
         }
         Ok(bytes)
     }
@@ -316,4 +324,11 @@ impl QueryEngine {
         };
         Some(end)
     }
+}
+
+fn binary_mode_unsupported_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "binary-mode indexes are not supported in this release; use a previous tagged release for binary mode",
+    )
 }

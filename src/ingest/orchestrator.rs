@@ -1,7 +1,6 @@
 use crate::IndexReader;
 use crate::api::IndexStats;
 use crate::index::builder::ShardBuilder;
-use crate::index::encoding::EncodingMode;
 use crate::index::wavelet::WaveletBuildMode;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -21,7 +20,6 @@ pub struct IngestConfig {
     pub read_buffer: usize,
     pub num_workers: usize,
     pub sample_rate: u32,
-    pub encoding_mode: EncodingMode,
     pub wavelet_mode: WaveletBuildMode,
 }
 
@@ -145,7 +143,6 @@ impl Orchestrator {
         let output_dir = self.config.output_dir.clone();
         let scratch_dir = self.config.scratch_dir.clone();
         let sample_rate = self.config.sample_rate;
-        let encoding_mode = self.config.encoding_mode;
         let wavelet_mode = self.config.wavelet_mode;
 
         for id in 0..self.config.num_workers {
@@ -168,8 +165,7 @@ impl Orchestrator {
                     pb.set_length(1);
                     pb.set_message(format!("Building shard {} ({} MB)", job.id, size_mb));
 
-                    let builder =
-                        ShardBuilder::new_with_modes(sample_rate, encoding_mode, wavelet_mode);
+                    let builder = ShardBuilder::new_with_wavelet_mode(sample_rate, wavelet_mode);
                     let builder = if let Some(dir) = scratch_dir.as_deref() {
                         builder.with_scratch_dir(dir)
                     } else {
@@ -399,9 +395,9 @@ impl Orchestrator {
             if n == 0 {
                 break;
             }
-            if self.config.encoding_mode == EncodingMode::Text && temp[..n].contains(&0) {
+            if temp[..n].contains(&0) {
                 anyhow::bail!(
-                    "Input file {:?} contains 0 byte; sentinel conflicts with text mode",
+                    "Input file {:?} contains 0 byte; 0 is reserved for the sentinel",
                     path
                 );
             }

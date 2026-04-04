@@ -679,10 +679,11 @@ pub(crate) fn make_wavelet_build_strategy(
 ) -> io::Result<Box<dyn WaveletBuildStrategy>> {
     let plan = plan_wavelet_stream(&codes, counts);
     let total_bits = plan.total_bits();
+    let planned_wavelet_bytes = paged_wavelet_bytes(total_bits);
     let resolved_scratch_dir = scratch::resolve_scratch_dir(scratch_dir);
     let resolved = match mode {
         WaveletBuildMode::Auto { max_bytes } => {
-            if total_bits > max_bytes {
+            if planned_wavelet_bytes > max_bytes as u64 {
                 WaveletBuildMode::Streaming
             } else {
                 WaveletBuildMode::InMemory
@@ -695,7 +696,7 @@ pub(crate) fn make_wavelet_build_strategy(
         WaveletBuildMode::InMemory => Ok(Box::new(InMemoryWaveletBuild::build(bwt_file, codes)?)),
         WaveletBuildMode::Streaming => {
             let tree_shape = plan.tree_shape().to_vec();
-            let wavelet_bytes = paged_wavelet_bytes(total_bits);
+            let wavelet_bytes = planned_wavelet_bytes;
             Ok(Box::new(StreamingWaveletBuild {
                 tree_shape,
                 codes,
@@ -1153,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_alphabet_spanning_pages() {
+    fn test_two_symbol_alphabet_spanning_pages() {
         // Generates enough data to force multiple pages in the root bitvector
         // 40,000 bits > 32,704 bits (1 page payload)
         let len = 40_000;
@@ -1167,7 +1168,7 @@ mod tests {
 
     #[test]
     fn test_full_byte_range() {
-        // Force a complex tree with full byte range (+256 for binary mode)
+        // Force a complex tree with full byte range and sentinel slot.
         let mut text = Vec::new();
         for i in 0..=256u16 {
             text.push(i);

@@ -1,4 +1,4 @@
-use crate::{IndexBuilder, IndexReader, RandomAccessRead, SharedRandomAccessRead};
+use crate::{IndexBuilder, IndexReader, RandomAccessRead, SaBackendKind, SharedRandomAccessRead};
 use std::io;
 use std::sync::Arc;
 
@@ -78,4 +78,34 @@ fn test_builder_invalid_scratch_dir_fails() {
         .unwrap_err();
 
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn test_builder_forced_external_backend_roundtrip() {
+    let builder = IndexBuilder::new(4)
+        .with_sa_backend_kind(SaBackendKind::External)
+        .with_sa_external_mem_limit_bytes(1024 * 1024);
+    let mut index_bytes = Vec::new();
+    builder
+        .build_single_document_to_writer(b"banana", &mut index_bytes)
+        .unwrap();
+
+    let reader = IndexReader::open_with_source(InMemorySource::new(index_bytes)).unwrap();
+    let mut locs = reader.locate(b"ana").unwrap();
+    locs.sort();
+    assert_eq!(locs, vec![1, 3]);
+}
+
+#[test]
+fn test_builder_libsais64_backend_roundtrip() {
+    let builder = IndexBuilder::new(4).with_sa_backend_kind(SaBackendKind::LibSais64);
+    let mut index_bytes = Vec::new();
+    builder
+        .build_single_document_to_writer(b"banana", &mut index_bytes)
+        .unwrap();
+
+    let reader = IndexReader::open_with_source(InMemorySource::new(index_bytes)).unwrap();
+    let mut locs = reader.locate(b"ana").unwrap();
+    locs.sort();
+    assert_eq!(locs, vec![1, 3]);
 }

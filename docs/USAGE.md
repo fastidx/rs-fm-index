@@ -292,14 +292,19 @@ let doc = reader.get_document(0)?;
 This implementation uses `0` as a sentinel byte. Multi-document builds append a single trailing
 sentinel; document boundaries are tracked via doc offsets (no separators between documents).
 
-Text mode (default):
-
 - Inputs **must not contain `0`**.
 
-Binary mode:
+### Binary Mode Support
 
-- Enable with `--binary` (CLI) or `IndexBuilder::with_encoding_mode(EncodingMode::Binary)`.
-- Bytes are remapped with `b + 1`, and `0` is reserved for the sentinel.
+- This release is **text-mode only**.
+- Binary-mode indexing is supported only in **previous tagged releases**.
+- Binary-mode indexes produced by those legacy tags are not supported by this release.
+
+*Footnote (future reintroduction steps):*
+1. Reintroduce an explicit binary build/query mode in API and CLI.
+2. Define sentinel and alphabet handling for binary mode without conflicting with text mode.
+3. Add compatibility tests for text-mode and binary-mode round trips across header versions.
+4. Document release/tag boundaries and migration guidance for binary users.
 
 ---
 

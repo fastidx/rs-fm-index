@@ -1,5 +1,4 @@
 use crate::index::builder::ShardBuilder;
-use crate::index::encoding::EncodingMode;
 use crate::index::header::ShardHeader;
 use crate::index::query::QueryEngine;
 use crate::iolib::paged_reader::{GlobalPageCache, PagedReader};
@@ -15,20 +14,15 @@ fn decode_header_from_path(path: &std::path::Path) -> ShardHeader {
 }
 
 fn build_query_engine(text: &[u8], sample_rate: u32) -> QueryEngine {
-    build_query_engine_with_mode(text, sample_rate, EncodingMode::Text)
-}
-
-fn build_query_engine_with_mode(
-    text: &[u8],
-    sample_rate: u32,
-    mode: EncodingMode,
-) -> QueryEngine {
-    let builder = ShardBuilder::new_with_mode(sample_rate, mode);
+    let builder = ShardBuilder::new(sample_rate);
     let tmp_file = NamedTempFile::new().unwrap();
     builder.build(text, tmp_file.path()).unwrap();
 
     let header = decode_header_from_path(tmp_file.path());
-    eprintln!("decoded offsets: {:?}", header.decode_doc_offsets().unwrap());
+    eprintln!(
+        "decoded offsets: {:?}",
+        header.decode_doc_offsets().unwrap()
+    );
     let cache = Arc::new(GlobalPageCache::new(10 * 1024 * 1024, 1));
     let reader = PagedReader::new(tmp_file.path(), 1234, cache).unwrap();
     QueryEngine::new(header, reader)
@@ -318,21 +312,4 @@ fn test_doc_safe_filters_cross_boundary() {
 
     let doc_safe = query.locate_doc_safe(b"cde").unwrap();
     assert!(doc_safe.is_empty());
-}
-
-#[test]
-fn test_binary_mode_roundtrip_and_search() {
-    let data = vec![0u8, 1, 2, 255, 0, 5, 6, 7, 255];
-    let query = build_query_engine_with_mode(&data, 4, EncodingMode::Binary);
-
-    let mut locs = query.locate(&[0, 1]).unwrap();
-    locs.sort();
-    assert_eq!(locs, vec![0]);
-
-    let mut locs_255 = query.locate(&[255]).unwrap();
-    locs_255.sort();
-    assert_eq!(locs_255, vec![3, 8]);
-
-    let extracted = query.extract(0, data.len()).unwrap();
-    assert_eq!(extracted, data);
 }
