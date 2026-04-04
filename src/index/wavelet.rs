@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_alphabet_spanning_pages() {
+    fn test_two_symbol_alphabet_spanning_pages() {
         // Generates enough data to force multiple pages in the root bitvector
         // 40,000 bits > 32,704 bits (1 page payload)
         let len = 40_000;
@@ -1168,7 +1168,7 @@ mod tests {
 
     #[test]
     fn test_full_byte_range() {
-        // Force a complex tree with full byte range (+256 for binary mode)
+        // Force a complex tree with full byte range and sentinel slot.
         let mut text = Vec::new();
         for i in 0..=256u16 {
             text.push(i);

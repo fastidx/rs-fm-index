@@ -293,7 +293,18 @@ This implementation uses `0` as a sentinel byte. Multi-document builds append a 
 sentinel; document boundaries are tracked via doc offsets (no separators between documents).
 
 - Inputs **must not contain `0`**.
-- Binary build mode has been removed from this version. If needed, use a previous tagged version.
+
+### Binary Mode Support
+
+- This release is **text-mode only**.
+- Binary-mode indexing is supported only in **previous tagged releases**.
+- Binary-mode indexes produced by those legacy tags are not supported by this release.
+
+*Footnote (future reintroduction steps):*
+1. Reintroduce an explicit binary build/query mode in API and CLI.
+2. Define sentinel and alphabet handling for binary mode without conflicting with text mode.
+3. Add compatibility tests for text-mode and binary-mode round trips across header versions.
+4. Document release/tag boundaries and migration guidance for binary users.
 
 ---
 
